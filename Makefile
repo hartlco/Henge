@@ -275,3 +275,11 @@ $(B)/test_device_identity: ios/Henge/DeviceIdentity.swift tests/test_device_iden
 test-identity: $(B)/test_device_identity
 	$(B)/test_device_identity
 .PHONY: test-identity
+
+# Physical keyboard shortcut mapping and focus-loss cleanup, without an iOS device.
+$(B)/test_hardware_shortcuts: ios/Henge/HardwareShortcutMapper.swift tests/test_hardware_shortcuts.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-hardware-shortcuts: $(B)/test_hardware_shortcuts
+	$(B)/test_hardware_shortcuts
+.PHONY: test-hardware-shortcuts
