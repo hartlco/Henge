@@ -368,12 +368,7 @@ static id<MTLBuffer> buffer_over_mapping(HvReplay *r, HvObject *o) {
 static void refresh_pages(HvReplay *r, uint32_t task, HvObject *o) {
     if (!o->mapped) return;
     uint64_t n = (o->length + 0x3fff) >> 14;
-    uint32_t stack[256];
-    uint32_t *now = n <= 256 ? stack : malloc(n * 4);
-    hv_pvg_lite_task_pages(r->lite, task, o->vpage, n, now);
-    BOOL same = memcmp(now, o->pages, n * 4) == 0;
-    if (now != stack) free(now);
-    if (same) return;
+    if (hv_pvg_lite_task_pages_match(r->lite, task, o->vpage, n, o->pages)) return;
     uint8_t *old = o->mapped;
     BOOL old_in_buffer = o->mapping_in_buffer;
     if (!map_pages(r, task, o)) return;
@@ -2434,12 +2429,13 @@ typedef struct {
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
+    BOOL tally = nres && getenv("HV_PVG_TALLY") != NULL;
     for (uint32_t i = 0; i < nres; i++) {
         HvObject *o = [self object:res[i * 2] task:task];
         if (!o) continue;
         if (o->mapped) refresh_pages(self, task, o);
         if (o->surface) sync_iosurface(o->surface);
-        if (getenv("HV_PVG_TALLY") && (o->entry[0] & 0xff) == OBJ_MAPPED_TEXTURE) {
+        if (tally && (o->entry[0] & 0xff) == OBJ_MAPPED_TEXTURE) {
             static uint32_t seen[256];
             uint32_t f = res[i * 2 + 1] & 0xff, key = res[i * 2] & 0xff;
             if (seen[key] != f + 1) {

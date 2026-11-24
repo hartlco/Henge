@@ -5,6 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "pvg_lite.h"
 #include "sysreg.h"
 #include "vmapple.h"
 
@@ -370,6 +371,47 @@ static void test_virtio_blk(HvDisk *aux) {
     rd8(bar + 0x1000);
 }
 
+static void test_gpu_task_pages(void) {
+    const uint64_t base = VMAPPLE_MEM + 0x1400000;
+    const uint32_t page = (uint32_t)(base >> 14);
+    uint32_t root_cmd[] = {0x38, 28, 1, 0, 0, 0, page + 1};
+    memcpy(ram(base + 128), root_cmd, sizeof root_cmd);
+    wr32(VMAPPLE_GFX + 0x1030, page);
+    wr32(VMAPPLE_GFX + 0x1010, 128);
+    wr32(VMAPPLE_GFX + 0x1004, 0x4000);
+    wr32(VMAPPLE_GFX + 0x1008, sizeof root_cmd);
+
+    uint32_t *root = (uint32_t *)ram(base + 0x4000), *top = (uint32_t *)ram(base + 0x8000);
+    uint32_t *left = (uint32_t *)ram(base + 0xc000), *right = (uint32_t *)ram(base + 0x10000);
+    root[0] = page + 2;
+    root[1] = 2;
+    top[0] = page + 3;
+    top[1] = page + 4;
+    left[4095] = (page + 5) | 0x80000000u;
+    right[0] = 0;
+    right[1] = page + 6;
+
+    uint32_t saved[3], expected[] = {page + 5, 0, page + 6};
+    hv_pvg_lite_task_pages(board.pvg, 0, 4095, 3, saved);
+    check("GPU pages cross a leaf and preserve a hole", memcmp(saved, expected, sizeof saved), 0);
+    left[4095] &= 0x7fffffffu;
+    check("GPU mapping ignores flag changes", hv_pvg_lite_task_pages_match(board.pvg, 0, 4095, 3, saved), 1);
+    right[0] = page + 7;
+    check("GPU mapping notices a filled hole", hv_pvg_lite_task_pages_match(board.pvg, 0, 4095, 3, saved), 0);
+    top[1] = 0;
+    check("GPU mapping notices a removed leaf", hv_pvg_lite_task_pages_match(board.pvg, 0, 4095, 3, saved), 0);
+    saved[2] = 0;
+    check("missing GPU leaf represents zero pages", hv_pvg_lite_task_pages_match(board.pvg, 0, 4095, 3, saved), 1);
+    uint32_t *outer = (uint32_t *)ram(base + 0x14000);
+    outer[0] = (page + 2) | 0x80000000u;
+    root[0] = page + 5;
+    root[1] = 3;
+    check("GPU mapping follows a third level", hv_pvg_lite_task_pages_match(board.pvg, 0, 4095, 3, saved), 1);
+    root[1] = UINT32_MAX;
+    hv_pvg_lite_task_pages(board.pvg, 0, 4095, 3, saved);
+    check("invalid GPU root clears all pages", saved[0] | saved[1] | saved[2], 0);
+}
+
 static void test_mouse_report(void) {
     HvVirtioInput *mouse = board.mouse;
     uint64_t bar = VMAPPLE_PCIE_MMIO + 0x400000;
@@ -668,6 +710,7 @@ int main(void) {
     check("gpio interrupt cleared", board.gic->level[32 + VMAPPLE_IRQ_GPIO], 0);
     test_guest_programs();
     test_gic_routing();
+    test_gpu_task_pages();
 
     hv_disk_close(&root);
     hv_disk_close(&aux);
