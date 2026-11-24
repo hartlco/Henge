@@ -1,4 +1,5 @@
 #include "harness.h"
+#include "translate.h"
 
 #include <stdlib.h>
 
@@ -22,6 +23,52 @@ static const TestProgram programs[] = {
     TEST_PROGRAM(stolen),  TEST_PROGRAM(pcrel),  TEST_PROGRAM(long_block), TEST_PROGRAM(pstate_bits), TEST_PROGRAM(hop),
 };
 
+/* The hot branch and its exit can straddle B's 128 MiB limit. Each word
+   needs restoring independently, including a conditional close to the victim. */
+static int test_eviction_branch_range(void) {
+    static HvMachine m;
+    if (hv_machine_init(&m, 160u << 20)) return 1;
+    hv_jit_ring(&m.jit, 2);
+    const int range = 1 << 25, split = m.jit.seg_words;
+    const struct {
+        int target, site, hot;
+        uint32_t hot_op;
+        int direct_site, direct_hot;
+    } cases[] = {
+        {32, range + 32, range + 33, 0x14000000, 1, 0},
+        {64, range + 65, range + 64, 0x14000000, 0, 1},
+        {96, range + 110, range + 109, 0x54000000, 0, 0},
+        {split - 16, split + 8, split + 7, 0x54000000, 1, 1}
+    };
+    int bad = 0;
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+        uint32_t *base = m.jit.base, *site = base + cases[i].site, *hot = base + cases[i].hot;
+        m.slots[i] = (uintptr_t)(base + cases[i].target);
+        m.slot_site[i] = hv_slot_enc(&m, site);
+        m.slot_stub[i] = hv_slot_enc(&m, site + 4);
+        m.slot_cond[i] = hv_slot_enc(&m, hot);
+        hv_slot_tlist_insert(&m, 0, i);
+        uint32_t branch = 0x14000004, hot_branch = cases[i].hot_op;
+        if (cases[i].direct_site) bad |= !hv_branch_retarget(&branch, cases[i].target - cases[i].site);
+        int to = cases[i].direct_hot ? cases[i].target : cases[i].site;
+        bad |= !hv_branch_retarget(&hot_branch, to - cases[i].hot);
+        hv_jit_write(&m.jit, site, &branch, 4);
+        hv_jit_write(&m.jit, hot, &hot_branch, 4);
+    }
+    hv_jit_finish_words(&m.jit, NULL, 0); /* return MAP_JIT to executable before the eviction reads the branches */
+    hv_evict_blocks(&m);
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+        uint32_t hot_branch = cases[i].hot_op;
+        bad |= !hv_branch_retarget(&hot_branch, cases[i].site - cases[i].hot);
+        bad |= m.slots[i] != 0 || m.slot_tseg[i] != 0 || m.jit.base[cases[i].site] != 0x14000004 ||
+               m.jit.base[cases[i].hot] != hot_branch;
+    }
+    bad |= m.stats.evict_unchained != 4 || m.stats.evict_slot_only != 1;
+    hv_machine_free(&m);
+    printf("eviction at branch range limits: %s\n", bad ? "FAIL" : "ok");
+    return bad;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static HvMachine m;
@@ -38,7 +85,7 @@ int main(void) {
     uint64_t sp = (uint64_t)(uintptr_t)stack + 32768;
 
     m.trace = getenv("HV_TRACE") != NULL;
-    int failed = 0;
+    int failed = test_eviction_branch_range();
     size_t count = sizeof programs / sizeof programs[0];
     for (size_t i = 0; i < count; i++) {
         const TestProgram *p = &programs[i];

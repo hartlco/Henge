@@ -157,7 +157,9 @@ void hv_evict_blocks(HvMachine *m) {
         m->slot_free[nfree++] = idx;
     }
     m->seg_slots_len[seg] = 0;
+    uint32_t unchained = 0, slot_only = 0;
     for (uint32_t k = m->tseg_head[seg]; k;) {
+        size_t before = nwords;
         uint32_t idx = k - 1u;
         k = m->slot_tnext[idx];
         m->slot_tnext[idx] = 0;
@@ -168,26 +170,32 @@ void hv_evict_blocks(HvMachine *m) {
         uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
         uint32_t *stub = hv_slot_dec(m, m->slot_stub[idx]);
         if (site && stub) {
-            uint32_t insn = 0x14000000u | (uint32_t)((stub - site) & 0x3ffffff); /* back to its stub */
+            uint32_t insn = 0x14000000u | (uint32_t)((stub - site) & 0x3ffffff);
             if (nwords + 2 > nwords_cap) {
                 size_t cap = nwords_cap ? nwords_cap * 2 : 65536;
                 uint32_t **w = realloc(words, cap * sizeof *w);
                 if (!w) abort();
                 words = w, nwords_cap = cap;
             }
-            hv_jit_write(r, site, &insn, 4);
-            words[nwords++] = site;
+            /* A branch that could not reach its target still points to the stub. */
+            if (*site != insn) {
+                hv_jit_write(r, site, &insn, 4);
+                words[nwords++] = site;
+            }
             uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
-            if (cond) { /* the hot part's conditional branch went to the exit's B before it was chained */
-                insn = *cond;
-                if (hv_branch_retarget(&insn, site - cond)) {
+            if (cond) {
+                uint32_t old = *cond, insn = old;
+                if (hv_branch_retarget(&insn, site - cond) && insn != old) {
                     hv_jit_write(r, cond, &insn, 4);
                     words[nwords++] = cond;
                 }
             }
         }
-        m->stats.evict_unchained++;
+        unchained++;
+        slot_only += nwords == before;
     }
+    m->stats.evict_unchained += unchained;
+    m->stats.evict_slot_only += slot_only;
     m->tseg_head[seg] = 0;
     m->nslot_free = nfree;
     m->slot_take = 0;
@@ -789,13 +797,13 @@ static void print_stats(HvCpu *cpu, int force) {
 #define RATE(f) ((double)(s->f - last.f) / dt)
     fprintf(stderr,
             "stats %5.0fs: blocks %.2fM/s, translated %.0f/s (again: va %.0f%% va+pa %.0f%%; %.0f%% of time, %.1f insns, %.1fx), slow mem %.0fK/s, mrs %.0fK/s msr %.0fK/s sys %.0fK/s, "
-            "exc %.0f/s irq %.0f/s, tlb flush %.0f/s, fetch walks %.0fK/s, wfi %.0f/s (%.0f%% idle), flushes %.0f/s (smc %.0f ic %.0f full %.0f), blocks held %d (%.0f MB, %llu full flushes, %llu evictions: %.0f ms (blocks %.0f, exits %.0f, icache %.0f), %.0fK blocks dropped, %.0fK exits unchained), chained %.0f/s ijc fills %.0fK/s resets %.0f/s, el%u pc %llx\n",
+            "exc %.0f/s irq %.0f/s, tlb flush %.0f/s, fetch walks %.0fK/s, wfi %.0f/s (%.0f%% idle), flushes %.0f/s (smc %.0f ic %.0f full %.0f), blocks held %d (%.0f MB, %llu full flushes, %llu evictions: %.0f ms (blocks %.0f, exits %.0f, icache %.0f), %.0fK blocks dropped, %.0fK exits unchained, %.0fK through slot alone), chained %.0f/s ijc fills %.0fK/s resets %.0f/s, el%u pc %llx\n",
             (double)(now - start_t) / 24e6, RATE(blocks) / 1e6, RATE(translations), 100.0 * RATE(retrans_va) / (RATE(translations) + 1e-9), 100.0 * RATE(retrans_vapa) / (RATE(translations) + 1e-9), 100.0 * (double)(s->translate_ticks - last.translate_ticks) / (double)(now - last_t), RATE(translated_insns) / (RATE(translations) + 1e-9), RATE(translated_words) / (RATE(translated_insns) + 1e-9), RATE(helper[HV_OP_MEM]) / 1e3,
             RATE(helper[HV_OP_MRS]) / 1e3, RATE(helper[HV_OP_MSR]) / 1e3, RATE(helper[HV_OP_SYS]) / 1e3,
             RATE(exceptions), RATE(interrupts), RATE(tlb_flushes), RATE(fetch_walks) / 1e3, RATE(wfi),
             100.0 * (double)(s->wfi_ticks - last.wfi_ticks) / (double)(now - last_t), RATE(block_flushes), RATE(flush_smc),
             RATE(flush_ic), RATE(flush_full), m->nblocks, (double)hv_jit_extent(&m->jit) * 4 / (1 << 20), (unsigned long long)s->flush_full,
-            (unsigned long long)s->evictions, (double)s->evict_ticks / 24e3, (double)s->evict_phase[0] / 24e3, (double)s->evict_phase[1] / 24e3, (double)s->evict_phase[2] / 24e3, (double)s->evict_blocks / 1e3, (double)s->evict_unchained / 1e3, RATE(chained), RATE(ijc_fills) / 1e3, RATE(ijc_resets), cpu->el,
+            (unsigned long long)s->evictions, (double)s->evict_ticks / 24e3, (double)s->evict_phase[0] / 24e3, (double)s->evict_phase[1] / 24e3, (double)s->evict_phase[2] / 24e3, (double)s->evict_blocks / 1e3, (double)s->evict_unchained / 1e3, (double)s->evict_slot_only / 1e3, RATE(chained), RATE(ijc_fills) / 1e3, RATE(ijc_resets), cpu->el,
             (unsigned long long)cpu->pc);
     {
         double tot = 0;
