@@ -370,6 +370,27 @@ static void test_virtio_blk(HvDisk *aux) {
     rd8(bar + 0x1000);
 }
 
+static void test_mouse_report(void) {
+    HvVirtioInput *mouse = board.mouse;
+    uint64_t bar = VMAPPLE_PCIE_MMIO + 0x400000;
+    uint64_t q = setup_virtio(mouse->vio.pci.slot, bar, VMAPPLE_MEM + 0x1200000);
+    uint64_t data = q + 0x8000;
+    const HvInputEvent events[] = {
+        {HV_EV_REL, HV_REL_X, (uint32_t)-5}, {HV_EV_REL, HV_REL_Y, 7}, {HV_EV_SYN, 0, 0}
+    };
+    for (int i = 0; i < 3; i++) put_desc(q, i, data + 8 * i, 8, 2, 0);
+    offer(q, 0);
+    hv_virtio_input_send_events(mouse, events, 3);
+    hv_virtio_input_poll(mouse);
+    check("mouse consumes available buffer", used_idx(q), 1);
+    offer(q, 1);
+    offer(q, 2);
+    hv_virtio_input_poll(mouse);
+    check("mouse finishes report when buffers return", used_idx(q), 3);
+    check("mouse reports both axes followed by sync", memcmp(ram(data), events, sizeof events), 0);
+    rd8(bar + 0x1000);
+}
+
 static uint8_t sent[2048];
 static uint32_t sent_len;
 static void capture_tx(void *opaque, const uint8_t *frame, uint32_t len) {
@@ -628,6 +649,7 @@ int main(void) {
     test_bdif(&root, &aux);
     test_virtio_blk(&aux);
     test_virtio_net();
+    test_mouse_report();
     test_virtio_balloon();
     test_aes();
     /* MSI frame: valid type register, doorbell pends the INTID */

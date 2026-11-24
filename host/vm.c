@@ -715,9 +715,10 @@ static void move_now(void *ctx) {
     /* Always both axes. macOS's virtio mouse keeps the last value of an axis a report leaves out,
        so a report without X or Y moved the pointer by the previous amount again (the pointer kept drifting the
        last way it went while a page scrolled). */
-    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, dx);
-    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, dy);
-    hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+    const HvInputEvent report[] = {
+        {HV_EV_REL, HV_REL_X, (uint32_t)dx}, {HV_EV_REL, HV_REL_Y, (uint32_t)dy}, {HV_EV_SYN, 0, 0}
+    };
+    hv_virtio_input_send_events(board.mouse, report, 3);
 }
 
 void hv_vm_mouse_move(int dx, int dy) {
@@ -725,18 +726,19 @@ void hv_vm_mouse_move(int dx, int dy) {
     dispatch_async_f(pointer_queue(), (void *)(intptr_t)packed, move_now);
 }
 
-static void zero_motion(void) { /* see move_now: a report must say "no motion", or the last motion repeats */
-    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_X, 0);
-    hv_virtio_input_send(board.mouse, HV_EV_REL, HV_REL_Y, 0);
+/* Include both zero deltas on a stationary click or scroll, as for motion above. */
+static void mouse_action(uint16_t type, uint16_t code, int value) {
+    const HvInputEvent report[] = {
+        {HV_EV_REL, HV_REL_X, 0}, {HV_EV_REL, HV_REL_Y, 0}, {type, code, (uint32_t)value}, {HV_EV_SYN, 0, 0}
+    };
+    hv_virtio_input_send_events(board.mouse, report, 4);
 }
 
 static void left_update(void) {
     int down = left_user || left_click;
     if (down == left_sent) return;
     left_sent = down;
-    zero_motion();
-    hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_LEFT, down);
-    hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+    mouse_action(HV_EV_KEY, HV_BTN_LEFT, down);
 }
 
 static void button_now(void *ctx) {
@@ -758,9 +760,7 @@ static void button_now(void *ctx) {
             rctrl_hold(&rctrl_click, 0);
         }
     } else if (button == 2) {
-        zero_motion();
-        hv_virtio_input_send(board.mouse, HV_EV_KEY, HV_BTN_MIDDLE, down);
-        hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+        mouse_action(HV_EV_KEY, HV_BTN_MIDDLE, down);
     }
 }
 
@@ -773,9 +773,7 @@ void hv_vm_mouse_button(int button, int down) {
 static void wheel(uint16_t axis, int amount) {
     while (amount) {
         int piece = amount > 100 ? 100 : amount < -100 ? -100 : amount;
-        zero_motion();
-        hv_virtio_input_send(board.mouse, HV_EV_REL, axis, piece);
-        hv_virtio_input_send(board.mouse, HV_EV_SYN, 0, 0);
+        mouse_action(HV_EV_REL, axis, piece);
         amount -= piece;
     }
 }

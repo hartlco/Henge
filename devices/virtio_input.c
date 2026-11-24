@@ -97,19 +97,23 @@ static void notify(HvVirtio *v, int q) {
     if (any) hv_virtio_interrupt(v);
 }
 
-void hv_virtio_input_send(HvVirtioInput *d, uint16_t type, uint16_t code, int32_t value) {
-    if (!d) return;
+void hv_virtio_input_send_events(HvVirtioInput *d, const HvInputEvent *events, unsigned count) {
+    if (!d || !count) return;
     pthread_mutex_lock(&d->mu);
-    if (d->tail - d->head == HV_VINPUT_RING) {
-        d->head++; /* full: lose the oldest */
-        d->dropped++;
+    for (unsigned i = 0; i < count; i++) {
+        if (d->tail - d->head == HV_VINPUT_RING) {
+            d->head++; /* full: lose the oldest */
+            d->dropped++;
+        }
+        d->ring[d->tail++ % HV_VINPUT_RING] = events[i];
     }
-    uint32_t i = d->tail++ % HV_VINPUT_RING;
-    d->ring[i].type = type;
-    d->ring[i].code = code;
-    d->ring[i].value = (uint32_t)value;
     pthread_mutex_unlock(&d->mu);
     hv_machine_wake(d->vio.m);
+}
+
+void hv_virtio_input_send(HvVirtioInput *d, uint16_t type, uint16_t code, int32_t value) {
+    HvInputEvent ev = {type, code, (uint32_t)value};
+    hv_virtio_input_send_events(d, &ev, 1);
 }
 
 void hv_virtio_input_poll(HvVirtioInput *d) {
