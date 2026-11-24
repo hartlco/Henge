@@ -46,7 +46,9 @@ static void (*extra_poll)(void);
 static void (*exit_cb)(int);
 static pthread_t secondary_threads[HV_MAX_CPUS], kicker;
 static int secondary_started[HV_MAX_CPUS], kicker_started;
-static _Atomic int kicker_stopped;
+static _Atomic int kicker_stopped, kicker_waiting;
+static pthread_mutex_t kicker_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t kicker_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t primary_thread;
 static int primary_started, cpu0_ours, sound_on;
 /* Instant resume: a pause stops the CPUs and quiets the devices without taking the machine apart. */
@@ -341,11 +343,39 @@ void hv_vm_destroy(void) {
     machine_created = 0;
 }
 
+static int any_cpu_active(void) {
+    for (int i = 0; i < ncpus; i++)
+        if (__atomic_load_n(&m.percpu[i].active, __ATOMIC_SEQ_CST)) return 1;
+    return 0;
+}
+
+static void wake_kicker(void) {
+    if (!atomic_load(&kicker_waiting)) return;
+    pthread_mutex_lock(&kicker_mu);
+    pthread_cond_signal(&kicker_cv);
+    pthread_mutex_unlock(&kicker_mu);
+}
+
+static void stop_kicker(void) {
+    atomic_store(&kicker_stopped, 1);
+    wake_kicker();
+}
+
 static void *kicker_thread(void *unused) {
     (void)unused;
     while (!atomic_load(&kicker_stopped)) {
+        if (!any_cpu_active()) {
+            pthread_mutex_lock(&kicker_mu);
+            /* Publish before checking again so a CPU leaving WFI cannot miss this waiter. */
+            atomic_store(&kicker_waiting, 1);
+            while (!any_cpu_active() && !atomic_load(&kicker_stopped))
+                pthread_cond_wait(&kicker_cv, &kicker_mu);
+            atomic_store(&kicker_waiting, 0);
+            pthread_mutex_unlock(&kicker_mu);
+            if (atomic_load(&kicker_stopped)) break;
+        }
         usleep(1000);
-        hv_machine_kick_all(&m);
+        if (any_cpu_active()) hv_machine_kick_all(&m);
     }
     return NULL;
 }
@@ -461,7 +491,7 @@ static int all_saving(void) {
 }
 
 int hv_vm_finish_pause(void) {
-    atomic_store(&kicker_stopped, 1);
+    stop_kicker();
     for (int i = 1; i < ncpus; i++)
         if (secondary_started[i]) pthread_join(secondary_threads[i], NULL);
     if (kicker_started) pthread_join(kicker, NULL);
@@ -571,7 +601,7 @@ static void *cpu0_thread(void *unused) {
     /* Finish CPU activity before flushing or telling the UI the Mac stopped.
        CPU 0 can also leave for a fatal execution error. */
     hv_machine_halt(&m, HV_HALT_HOST);
-    atomic_store(&kicker_stopped, 1);
+    stop_kicker();
     for (int i = 1; i < ncpus; i++)
         if (secondary_started[i]) pthread_join(secondary_threads[i], NULL);
     if (kicker_started) pthread_join(kicker, NULL);
@@ -600,6 +630,7 @@ int hv_vm_start(int cpu0, void (*on_exit)(int reason)) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 8u << 20);
+    m.cpu_became_active = wake_kicker;
     atomic_store(&kicker_stopped, 0);
     /* Publish all join handles before CPU 0 can reach its exit callback. */
     for (int i = 1; i < ncpus; i++) {
@@ -617,7 +648,7 @@ int hv_vm_start(int cpu0, void (*on_exit)(int reason)) {
 failed:
     pthread_attr_destroy(&attr);
     hv_machine_halt(&m, HV_HALT_HOST);
-    atomic_store(&kicker_stopped, 1);
+    stop_kicker();
     for (int i = 1; i < ncpus; i++)
         if (secondary_started[i]) pthread_join(secondary_threads[i], NULL);
     memset(secondary_started, 0, sizeof secondary_started);

@@ -307,6 +307,7 @@ typedef struct HvMachine {
     pthread_mutex_t big_mu;
     pthread_cond_t big_cv;
     uint64_t big_next, big_serving;
+    void (*cpu_became_active)(void); /* host timer thread may be parked with every guest CPU idle */
     int stats_interval;  /* seconds between --stats lines, 0 = off */
     /* --profile: host PCs of the CPU thread sampled every millisecond, drained by the stats line. */
     uint64_t *prof;

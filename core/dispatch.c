@@ -234,6 +234,7 @@ static void unpark(HvCpu *cpu) {
         while (m->stw_active) pthread_cond_wait(&m->stw_cv, &m->stw_mu);
         pthread_mutex_unlock(&m->stw_mu);
     }
+    if (m->cpu_became_active) m->cpu_became_active();
     __atomic_store_n(&p->tlb_live, 1, __ATOMIC_SEQ_CST);
     hv_cpu_process_requests(cpu); /* what came in while it was parked */
 }
