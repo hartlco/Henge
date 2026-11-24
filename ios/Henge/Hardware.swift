@@ -27,7 +27,7 @@ enum Device {
     /// Every iPad with an M chip is 264 ppi.
     static var retinaScreen: (width: Int, height: Int) {
         let n = UIScreen.main.nativeBounds.size
-        return (Int(max(n.width, n.height)) / 8 * 8, Int(min(n.width, n.height)) / 8 * 8)
+        return (Int(max(n.width, n.height)), Int(min(n.width, n.height)))
     }
     static var retinaMM: (width: Int, height: Int) {
         let s = retinaScreen
@@ -170,16 +170,6 @@ enum PointerLock {
     static var isLocked: Bool {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .contains { $0.activationState == .foregroundActive && $0.pointerLockState?.isLocked == true }
-    }
-
-    /// iPadOS only locks the pointer to an app that fills the screen: in a window (Stage Manager, or iPadOS 26's windows)
-    /// the request is ignored and the system pointer stays separate from the Mac's (#18). An iPhone never locks it, and
-    /// its apps are always full screen, so the hint is for iPad only.
-    static var refused: Bool {
-        guard Device.isPad, wanted, GCMouse.current != nil else { return false }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }
-        let full = scenes.contains { $0.windows.contains { $0.isKeyWindow && fillsScreen($0) } }
-        return full && !scenes.contains { $0.pointerLockState?.isLocked == true }
     }
 }
 

@@ -126,13 +126,16 @@ private struct GPUScreen: UIViewRepresentable {
         }
 
         private func attachIfReady() {
-            guard window != nil, bounds.width > 0, bounds.height > 0,
+            guard let window, bounds.width > 0, bounds.height > 0,
                   let metal = layer as? CAMetalLayer else { return }
+            let scale = window.screen.nativeScale
+            let scaleChanged = contentScaleFactor != scale
+            if scaleChanged { contentScaleFactor = scale }
             if !attached {
                 attached = true
                 lastSize = bounds.size
                 display.connect(id, layer: metal, role: role)
-            } else if lastSize != bounds.size {
+            } else if lastSize != bounds.size || scaleChanged {
                 lastSize = bounds.size
                 display.refresh(id)
             }
