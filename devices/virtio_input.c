@@ -116,6 +116,34 @@ void hv_virtio_input_send(HvVirtioInput *d, uint16_t type, uint16_t code, int32_
     hv_virtio_input_send_events(d, &ev, 1);
 }
 
+void hv_virtio_input_scroll_step(HvVirtioInput *d, int dx, int dy) {
+    if (!d || (!dx && !dy)) return;
+    pthread_mutex_lock(&d->mu);
+    for (uint32_t i = d->head; i != d->tail && (dx || dy); i++) {
+        const HvInputEvent *ev = &d->ring[i % HV_VINPUT_RING];
+        if (ev->type != HV_EV_REL || !ev->value) continue;
+        if (ev->code == HV_REL_HWHEEL) dx = 0;
+        if (ev->code == HV_REL_WHEEL) dy = 0;
+    }
+    if (!dx && !dy) {
+        pthread_mutex_unlock(&d->mu);
+        return;
+    }
+    /* Include both stationary pointer axes, as for a button or legacy wheel report. */
+    HvInputEvent report[5] = {{HV_EV_REL, HV_REL_X, 0}, {HV_EV_REL, HV_REL_Y, 0}};
+    unsigned n = 2;
+    if (dx) report[n++] = (HvInputEvent){HV_EV_REL, HV_REL_HWHEEL, dx < 0 ? (uint32_t)-1 : 1};
+    if (dy) report[n++] = (HvInputEvent){HV_EV_REL, HV_REL_WHEEL, dy < 0 ? (uint32_t)-1 : 1};
+    report[n++] = (HvInputEvent){HV_EV_SYN, 0, 0};
+    if (HV_VINPUT_RING - (d->tail - d->head) < n) {
+        pthread_mutex_unlock(&d->mu);
+        return;
+    }
+    for (unsigned j = 0; j < n; j++) d->ring[d->tail++ % HV_VINPUT_RING] = report[j];
+    pthread_mutex_unlock(&d->mu);
+    hv_machine_wake(d->vio.m);
+}
+
 void hv_virtio_input_poll(HvVirtioInput *d) {
     if (!d) return;
     HvVirtio *v = &d->vio;

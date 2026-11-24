@@ -92,11 +92,14 @@ void henge_vm_mouse_move(int dx, int dy);
 void henge_vm_mouse_button(int button, int down);
 /* Wheel units: dy > 0 up, dx > 0 right. */
 void henge_vm_mouse_scroll(int dx, int dy);
+void henge_vm_scroll_step(int dx, int dy);
 /* The Magic Trackpad 2 the Mac sees on its USB bus: a finger on it. phase: 0 down, 1 move, 2 up;
    finger a stable 1..15 per touch; x, y sensor units 0..8134, 0..5206. ts_ms is the touch
    sample's own clock in ms, so the guest computes finger speed from real sample timing. */
 void henge_vm_touch(int finger, int phase, int x, int y, uint32_t ts_ms);
 void henge_vm_touch_frame(uint32_t ts_ms); /* commit one frame with every finger that moved */
+void henge_vm_scroll_pair(int id, int phase, int left, int right, int y, uint32_t ts_ms);
+
 void henge_vm_touch_button(int down); /* the pad's full press (a click) */
 /* Put the Mac's pointer at x, y, each 0..1 across its screen: for an iPad pointer iPadOS won't lock. */
 void henge_vm_pointer_at(double x, double y);

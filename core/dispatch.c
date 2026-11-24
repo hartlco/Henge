@@ -833,7 +833,8 @@ static void print_stats(HvCpu *cpu, int force) {
                     RATE(flush_checked), RATE(flush_check_entries), RATE(flush_check_bad), RATE(flush_check_af));
         fprintf(stderr, "  cache drops/s: full %.0f, ASID %.0f, user VA %.0f, kernel VA %.0f, code %.0f (whole user half %.0f, filter full %.0f, big user range %.0f)\n", RATE(reset_why[0]),
                 RATE(reset_why[1]), RATE(reset_why[2]), RATE(reset_why[3]), RATE(reset_why[4]), RATE(reset_why[5]), RATE(reset_why[6]), RATE(reset_why[7]));
-        { /* block hash health: chain lengths and how much of it is stale */
+        const char *hash_stats = getenv("HV_STATS_HASH");
+        if (!hash_stats || atoi(hash_stats)) { /* an optional full walk for chain lengths and stale blocks */
             uint64_t used = 0, stale = 0, maxlen = 0, sumsq = 0;
             uint32_t worst = 0;
             for (uint32_t h = 0; h < HV_BLOCK_HASH; h++) {

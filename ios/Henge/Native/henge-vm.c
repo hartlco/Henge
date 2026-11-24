@@ -19,6 +19,7 @@
 #include "vm.h"
 #include "install.h"
 #include "snapshot.h"
+#include "scroll_trace.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -30,6 +31,7 @@ static int exit_reason, exit_outcome;
 static pthread_rwlock_t api_lock = PTHREAD_RWLOCK_INITIALIZER;
 static _Atomic uint64_t generation;
 static int installer_session;
+static int trace_scroll;
 static uint64_t stopped_blocks, stopped_tx, stopped_rx;
 static const char *exit_description(void);
 static int lock_running(void);
@@ -83,6 +85,9 @@ static int begin_start(char *err, size_t errlen) {
         pthread_rwlock_unlock(&api_lock);
         return -1;
     }
+    hv_scroll_trace_cancel();
+    const char *trace = getenv("HV_SCROLL_TRACE");
+    trace_scroll = trace && !strcmp(trace, "1");
     state = 3;
     return 0;
 }
@@ -412,6 +417,12 @@ void henge_vm_mouse_scroll(int dx, int dy) {
     if (dx) hv_vm_mouse_hwheel(dx);
     pthread_rwlock_unlock(&api_lock);
 }
+void henge_vm_scroll_step(int dx, int dy) {
+    if (!lock_running()) return;
+    if (trace_scroll) hv_scroll_trace_begin();
+    hv_vm_scroll_step(dx, dy);
+    pthread_rwlock_unlock(&api_lock);
+}
 int henge_vm_pointer(int *x, int *y) {
     if (!lock_running()) return -1;
     int result = hv_vm_pointer(x, y);
@@ -434,6 +445,13 @@ void henge_vm_touch_frame(uint32_t ts_ms) {
     hv_vm_touch_frame(ts_ms);
     pthread_rwlock_unlock(&api_lock);
 }
+void henge_vm_scroll_pair(int id, int phase, int left, int right, int y, uint32_t ts_ms) {
+    if (!lock_running()) return;
+    if (trace_scroll && phase != 2) hv_scroll_trace_begin();
+    hv_vm_scroll_pair(id, phase, left, right, y, ts_ms);
+    pthread_rwlock_unlock(&api_lock);
+}
+
 void henge_vm_touch_button(int down) {
     if (!lock_running()) return;
     hv_vm_touch_button(down);

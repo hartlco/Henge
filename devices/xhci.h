@@ -77,6 +77,7 @@ typedef struct HvXhci {
     uint32_t tp_ts;    /* the report timestamp, one per report */
     uint8_t tp_reports[HV_TP_REPORTS][HV_TP_REPORT_LEN];
     uint8_t tp_rlen[HV_TP_REPORTS];
+    uint8_t tp_scroll_moves; /* consecutive hardware scroll moves at the tail, capped at two */
     uint32_t tp_rhead, tp_rtail;
     int tp_mt;         /* the guest switched us to multitouch mode (feature report 2) */
     uint64_t tp_delivered;
@@ -106,6 +107,9 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms)
 /* Any thread: send one frame with every finger's current state (ends a move batch),
    stamped with the touch sample's own clock (ms). */
 void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms);
+/* A hardware scroll updates two contacts in a single USB report. */
+void hv_xhci_scroll_pair(HvXhci *x, int id, int phase, int left, int right, int y, uint32_t ts_ms);
+
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
 /* Any thread: put the guest's pointer at x, y, each 0..HV_PTR_MAX across the screen. */

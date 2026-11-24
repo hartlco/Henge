@@ -791,6 +791,16 @@ static void wheel_async(uint16_t axis, int amount) {
 void hv_vm_mouse_wheel(int dy) { wheel_async(HV_REL_WHEEL, dy); }
 void hv_vm_mouse_hwheel(int dx) { wheel_async(HV_REL_HWHEEL, dx); }
 
+void hv_vm_scroll_step(int dx, int dy) {
+    /* The pointer queue orders wheel steps with clicks. A delayed click can hold
+       the queue for 50 ms; discard steps older than one wheel interval. */
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    dispatch_async(pointer_queue(), ^{
+        if (!atomic_load(&input_stopping) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - now < NSEC_PER_SEC / 24)
+            hv_virtio_input_scroll_step(board.mouse, dx, dy);
+    });
+}
+
 void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms) {
     if (x < 0) x = 0;
     if (x > HV_TP_SENSOR_X) x = HV_TP_SENSOR_X;
@@ -800,6 +810,10 @@ void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms) {
 }
 
 void hv_vm_touch_frame(uint32_t ts_ms) { hv_xhci_touch_frame(board.usb, ts_ms); }
+
+void hv_vm_scroll_pair(int id, int phase, int left, int right, int y, uint32_t ts_ms) {
+    hv_xhci_scroll_pair(board.usb, id, phase, left, right, y, ts_ms);
+}
 
 void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
 

@@ -803,6 +803,7 @@ static void reset(HvXhci *x) {
     x->tp_button = 0;
     x->tp_ts = 0;
     x->tp_rhead = x->tp_rtail = 0;
+    x->tp_scroll_moves = 0;
     x->tp_mt = 0;
     x->tp_delivered = 0;
     x->tp_reqs = 0;
@@ -1085,19 +1086,30 @@ static uint32_t tp_now_ms(void) {
 
 /* Queue the current state as a report, stamped with the touch sample's clock (ms);
    ts_ms 0 falls back to the current time (the physical button). */
-static void tp_queue(HvXhci *x, uint32_t ts_ms) {
+static void tp_queue(HvXhci *x, uint32_t ts_ms, int scroll_move) {
     uint8_t r[HV_TP_REPORT_LEN];
     /* Strictly increasing: two frames with the same timestamp would give the guest a
        zero time delta (speed = distance / 0) and it can throw the frame away. */
     uint32_t now = ts_ms ? ts_ms : tp_now_ms();
     x->tp_ts = now > x->tp_ts ? now : x->tp_ts + 1;
     int len = tp_build_report(x, r);
-    if (x->tp_rtail - x->tp_rhead < HV_TP_REPORTS) {
-        unsigned at = x->tp_rtail % HV_TP_REPORTS;
-        memcpy(x->tp_reports[at], r, (size_t)len);
-        x->tp_rlen[at] = (uint8_t)len;
-        x->tp_rtail++;
+    unsigned queued = x->tp_rtail - x->tp_rhead;
+    /* The positions are absolute. If the guest falls behind, keep the first unread
+       move and update the second to the latest sample, including its timestamp.
+       A touch, button, landing or lift always starts a new sequence. */
+    if (!scroll_move) x->tp_scroll_moves = 0;
+    unsigned slot;
+    if (scroll_move && queued >= 2 && x->tp_scroll_moves == 2) {
+        slot = x->tp_rtail - 1;
+    } else {
+        if (queued == HV_TP_REPORTS) return;
+        if (x->tp_scroll_moves > queued) x->tp_scroll_moves = (uint8_t)queued;
+        if (scroll_move) x->tp_scroll_moves++;
+        slot = x->tp_rtail++;
     }
+    unsigned at = slot % HV_TP_REPORTS;
+    memcpy(x->tp_reports[at], r, (size_t)len);
+    x->tp_rlen[at] = (uint8_t)len;
 }
 
 static struct HvTpFinger *tp_new_finger(HvXhci *x) {
@@ -1105,41 +1117,52 @@ static struct HvTpFinger *tp_new_finger(HvXhci *x) {
     return NULL;
 }
 
-void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms) {
-    if (!x || id < 1 || id > 15) return;
-    pthread_mutex_lock(&x->mu);
+/* Update the contacts before queuing a report. The guest sees both scrolling
+   fingers land and lift together, just as it sees their motion together. */
+static struct HvTpFinger *tp_contact(HvXhci *x, int id, int phase, int px, int py) {
+    struct HvTpFinger *f = NULL;
     if (phase == 0) {
-        struct HvTpFinger *f = tp_new_finger(x);
-        if (f) {
-            f->in = 1;
-            f->id = id;
-            f->x = px;
-            f->y = py;
-            f->state = 4; /* contact: a touch, not a hover, so the guest tracks it at once */
-            tp_queue(x, ts_ms);
-        }
+        f = tp_new_finger(x);
+        if (f) { f->in = 1; f->id = id; }
     } else {
         for (int i = 0; i < HV_TP_FINGERS; i++) {
-            struct HvTpFinger *f = &x->tp_fingers[i];
-            if (!f->in || f->id != id) continue;
-            if (phase == 1) {
-                f->x = px;
-                f->y = py;
-                if (f->state == 3) f->state = 4;
-                /* no report yet: the caller commits one frame holding every finger that
-                   moved, so the guest sees them move together instead of one at a time */
-            } else {
-                f->state = 7; /* stop */
-                tp_queue(x, ts_ms);
-                f->in = 0;
-                f->state = 0; /* none */
-                tp_queue(x, ts_ms);
-            }
-            break;
+            if (x->tp_fingers[i].in && x->tp_fingers[i].id == id) { f = &x->tp_fingers[i]; break; }
         }
     }
+    if (f) {
+        f->state = phase == 2 ? 7 : 4;
+        if (phase != 2) { f->x = px; f->y = py; }
+    }
+    return f;
+}
+
+static void tp_lift(HvXhci *x, struct HvTpFinger *first, struct HvTpFinger *second, uint32_t ts_ms) {
+    tp_queue(x, ts_ms, 0); /* stop, then no contact */
+    if (first) first->in = first->state = 0;
+    if (second) second->in = second->state = 0;
+    tp_queue(x, ts_ms, 0);
+}
+
+void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms) {
+    if (!x || id < 1 || id > 15 || phase < 0 || phase > 2) return;
+    pthread_mutex_lock(&x->mu);
+    struct HvTpFinger *f = tp_contact(x, id, phase, px, py);
+    if (f && phase == 2) tp_lift(x, f, NULL, ts_ms);
+    else if (f && phase == 0) tp_queue(x, ts_ms, 0);
     pthread_mutex_unlock(&x->mu);
-    hv_machine_wake(x->m);
+    if (f && phase != 1) hv_machine_wake(x->m); /* moves go out in touch_frame */
+}
+
+void hv_xhci_scroll_pair(HvXhci *x, int id, int phase, int left, int right, int y, uint32_t ts_ms) {
+    if (!x || (id != 12 && id != 14) || phase < 0 || phase > 2) return;
+    pthread_mutex_lock(&x->mu);
+    struct HvTpFinger *a = tp_contact(x, id, phase, left, y);
+    struct HvTpFinger *b = tp_contact(x, id + 1, phase, right, y);
+    if (phase == 2 && (a || b)) tp_lift(x, a, b, ts_ms);
+    else if (a && b) tp_queue(x, ts_ms, phase == 1);
+    else if (phase == 0 && a) a->in = a->state = 0;
+    pthread_mutex_unlock(&x->mu);
+    if (a || b) hv_machine_wake(x->m);
 }
 
 /* Commit one frame with the current state of all the fingers: a move batch ends
@@ -1147,7 +1170,7 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms)
 void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms) {
     if (!x) return;
     pthread_mutex_lock(&x->mu);
-    tp_queue(x, ts_ms);
+    tp_queue(x, ts_ms, 0);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
@@ -1157,7 +1180,7 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
     pthread_mutex_lock(&x->mu);
     if (x->tp_button != (down & 1)) {
         x->tp_button = down & 1;
-        tp_queue(x, 0);
+        tp_queue(x, 0, 0);
     }
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);

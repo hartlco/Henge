@@ -19,6 +19,8 @@ enum EngineTuning {
         // An iPad measured 11% more frames with grouped accesses (one TLB check for several on one register, issue #164).
         "HV_GROUPS": "1",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
+        "HV_STATS_HASH": "0",  // 1 also walks the full translated-block table on the guest CPU thread
+        "HV_SCROLL_TRACE": "0", // 1 records displayed frame gaps and kernel scan time during hardware scrolling
     ]
 
     static func apply() {

@@ -45,6 +45,8 @@ HvVirtioInput *hv_virtio_input_create(HvMachine *m, HvPcie *bus, int kind);
 void hv_virtio_input_send(HvVirtioInput *d, uint16_t type, uint16_t code, int32_t value);
 /* Queue a whole report, including its terminating EV_SYN, before waking the CPU. */
 void hv_virtio_input_send_events(HvVirtioInput *d, const HvInputEvent *events, unsigned count);
+/* At most one unread hardware wheel step per axis while the guest is busy. */
+void hv_virtio_input_scroll_step(HvVirtioInput *d, int dx, int dy);
 /* CPU thread: hand queued events to the guest's buffers. */
 void hv_virtio_input_poll(HvVirtioInput *d);
 

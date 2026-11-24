@@ -1,5 +1,17 @@
 import SwiftUI
 
+struct HardwareScrollPicker: View {
+    @AppStorage(HardwareMouse.twoFingerScrollKey) private var twoFingerScroll = false
+
+    var body: some View {
+        Picker("Hardware scrolling", selection: $twoFingerScroll) {
+            Text("Wheel steps").tag(false)
+            Text("Two-finger gesture").tag(true)
+        }
+        .pickerStyle(.menu)
+    }
+}
+
 struct SettingsView: View {
     private enum Page: Hashable { case keyboard }
 
@@ -75,6 +87,7 @@ struct SettingsView: View {
                             Text("Pointer speed")
                             Slider(value: $mouseSpeed, in: 0.5...3)
                         }
+                        HardwareScrollPicker()
                         Toggle("Reverse scrolling", isOn: $reverseScrolling)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Scroll speed")

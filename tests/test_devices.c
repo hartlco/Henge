@@ -35,6 +35,58 @@ static void check(const char *what, uint64_t got, uint64_t want) {
     }
 }
 
+static void test_scroll_pair(void) {
+    HvXhci *x = board.usb;
+    hv_xhci_touch(x, 1, 0, 500, 500, 100); /* touchscreen contact throughout the scroll */
+    uint32_t first = x->tp_rtail;
+    hv_xhci_scroll_pair(x, 14, 0, 2000, 3100, 1000, 110);
+    hv_xhci_scroll_pair(x, 14, 1, 2050, 3150, 1030, 118);
+    hv_xhci_scroll_pair(x, 14, 2, 2050, 3150, 1030, 126);
+    check("paired contact report count", x->tp_rtail - first, 4);
+    for (unsigned i = 0; i < 4; i++) {
+        unsigned slot = (first + i) % HV_TP_REPORTS;
+        const uint8_t *r = x->tp_reports[slot];
+        check("touchscreen finger present", r[20] & 15, 1);
+        check("both scroll fingers together", x->tp_rlen[slot], i == 3 ? 21 : 39);
+        if (i < 3) {
+            check("left scroll id", r[29] & 15, 14);
+            check("right scroll id", r[38] & 15, 15);
+            check("left scroll state", r[24] >> 5, i == 2 ? 7 : 4);
+            check("right scroll state", r[33] >> 5, i == 2 ? 7 : 4);
+        }
+    }
+    hv_xhci_touch(x, 1, 2, 0, 0, 130);
+
+    /* While the guest is busy, a long swipe leaves the landing, two positions
+       and both lift reports. The next contact must not overwrite that lift. */
+    x->tp_rhead = x->tp_rtail;
+    first = x->tp_rtail;
+    hv_xhci_scroll_pair(x, 14, 0, 2000, 3100, 1000, 200);
+    for (int i = 1; i <= 120; i++)
+        hv_xhci_scroll_pair(x, 14, 1, 2000, 3100, 1000 + i, 200 + 8 * i);
+    hv_xhci_scroll_pair(x, 14, 2, 2000, 3100, 1120, 1170);
+    hv_xhci_scroll_pair(x, 12, 0, 1000, 2100, 2000, 1200);
+    check("queued scroll backlog and transitions", x->tp_rtail - first, 6);
+    const uint32_t stamps[] = {200, 208, 1160, 1170, 1171, 1200};
+    for (unsigned i = 0; i < 6; i++) {
+        const uint8_t *r = x->tp_reports[(first + i) % HV_TP_REPORTS];
+        check("scroll backlog timestamps", (r[9] >> 3) | r[10] << 5 | r[11] << 13, stamps[i]);
+    }
+    check("scroll backlog keeps lift", x->tp_reports[(first + 3) % HV_TP_REPORTS][15] >> 5, 7);
+    check("scroll backlog keeps empty report", x->tp_rlen[(first + 4) % HV_TP_REPORTS], 12);
+    check("scroll backlog keeps new contact", x->tp_reports[(first + 5) % HV_TP_REPORTS][20] & 15, 12);
+    /* A touchscreen contact change is also a boundary between coalescible moves. */
+    hv_xhci_touch(x, 1, 0, 500, 500, 1210);
+    hv_xhci_scroll_pair(x, 12, 1, 1010, 2110, 2020, 1220);
+    hv_xhci_scroll_pair(x, 12, 1, 1020, 2120, 2030, 1230);
+    hv_xhci_touch(x, 1, 2, 500, 500, 1240);
+    hv_xhci_scroll_pair(x, 12, 1, 1030, 2130, 2040, 1250);
+    check("touchscreen lifecycle splits queued motion", x->tp_rtail - first, 12);
+    check("touchscreen release delivered", x->tp_reports[(first + 9) % HV_TP_REPORTS][33] >> 5, 7);
+    hv_xhci_scroll_pair(x, 12, 2, 1030, 2130, 2040, 1260);
+    x->tp_rhead = x->tp_rtail;
+}
+
 static uint32_t rd32(uint64_t pa) {
     uint32_t v = 0;
     hv_phys_read(&m, pa, &v, 4);
@@ -430,6 +482,43 @@ static void test_mouse_report(void) {
     hv_virtio_input_poll(mouse);
     check("mouse finishes report when buffers return", used_idx(q), 3);
     check("mouse reports both axes followed by sync", memcmp(ram(data), events, sizeof events), 0);
+
+    /* Stall the guest, then post fresh buffers. Horizontal input and a click must
+       still arrive in order while repeated vertical input is being discarded. */
+    const HvInputEvent click[] = {{HV_EV_KEY, HV_BTN_LEFT, 1}, {HV_EV_SYN, 0, 0}};
+    const HvInputEvent stalled[] = {
+        {HV_EV_REL, HV_REL_X, 0}, {HV_EV_REL, HV_REL_Y, 0}, {HV_EV_REL, HV_REL_WHEEL, 1}, {HV_EV_SYN, 0, 0},
+        {HV_EV_KEY, HV_BTN_LEFT, 1}, {HV_EV_SYN, 0, 0},
+        {HV_EV_REL, HV_REL_X, 0}, {HV_EV_REL, HV_REL_Y, 0}, {HV_EV_REL, HV_REL_HWHEEL, (uint32_t)-1}, {HV_EV_SYN, 0, 0}
+    };
+    hv_virtio_input_scroll_step(mouse, 0, 99);
+    hv_virtio_input_send_events(mouse, click, 2);
+    for (int i = 0; i < 1000; i++) hv_virtio_input_scroll_step(mouse, -5, 7);
+    check("wheel stall retains one tick per axis and click", mouse->tail - mouse->head, 10);
+    for (int i = 0; i < 10; i++) {
+        put_desc(q, i, data + 8 * i, 8, 2, 0);
+        offer(q, i);
+    }
+    hv_virtio_input_poll(mouse);
+    check("guest received bounded wheel reports", used_idx(q), 13);
+    check("wheel caps signed steps and preserves click order", memcmp(ram(data), stalled, sizeof stalled), 0);
+
+    const HvInputEvent diagonal[] = {
+        {HV_EV_REL, HV_REL_X, 0}, {HV_EV_REL, HV_REL_Y, 0}, {HV_EV_REL, HV_REL_HWHEEL, 1},
+        {HV_EV_REL, HV_REL_WHEEL, (uint32_t)-1}, {HV_EV_SYN, 0, 0}
+    };
+    hv_virtio_input_scroll_step(mouse, 42, -42);
+    for (int i = 0; i < 5; i++) offer(q, i);
+    hv_virtio_input_poll(mouse);
+    check("guest can reverse after reading wheel", memcmp(ram(data), diagonal, sizeof diagonal), 0);
+    check("guest consumed diagonal report", used_idx(q), 18);
+
+    for (unsigned i = 0; i < HV_VINPUT_RING - 3; i++) hv_virtio_input_send(mouse, HV_EV_SYN, 0, 0);
+    uint32_t before = mouse->tail;
+    hv_virtio_input_scroll_step(mouse, 1, 0);
+    check("no partial wheel report in a full ring", mouse->tail, before);
+    check("wheel preserves existing input in a full ring", mouse->tail - mouse->head, HV_VINPUT_RING - 3);
+    mouse->head = mouse->tail;
     rd8(bar + 0x1000);
 }
 
@@ -711,6 +800,7 @@ int main(void) {
     test_guest_programs();
     test_gic_routing();
     test_gpu_task_pages();
+    test_scroll_pair();
 
     hv_disk_close(&root);
     hv_disk_close(&aux);

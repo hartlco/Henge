@@ -45,6 +45,7 @@ static int cursor_scale(void) {
 #include <string.h>
 
 #include "pvg_lite.h"
+#include "scroll_trace.h"
 #include "metallib.h"
 
 #if !TARGET_OS_IPHONE
@@ -194,6 +195,10 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint64_t pipes_hit, pipes_compiled, pipes_unsaved, pipes_unsaveable;
     double compile_ms, hit_ms;
     id<MTLTexture> cursor_tex;
+    BOOL separate_cursor, cursor_update_queued, cursor_visible;
+    uint32_t cursor_where, cursor_mode_w, cursor_mode_h;
+    id cursor_image; /* immutable CGImage, replaced when macOS changes the glyph */
+    CALayer *cursor_clip, *cursor_sprite; /* main queue only */
     id<MTLSamplerState> screen_sampler, cursor_sampler;
     uint64_t on_screen; /* the mapping showing */
     _Atomic uint64_t gpu_frames;
@@ -2430,11 +2435,15 @@ typedef struct {
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
     BOOL tally = nres && getenv("HV_PVG_TALLY") != NULL;
+    uint64_t capture = hv_scroll_trace_active(), first_fallback = 0;
     for (uint32_t i = 0; i < nres; i++) {
         HvObject *o = [self object:res[i * 2] task:task];
         if (!o) continue;
         if (o->mapped) refresh_pages(self, task, o);
-        if (o->surface) sync_iosurface(o->surface);
+        if (o->surface && o->surface->iosurface) {
+            if (capture && !first_fallback) first_fallback = hv_scroll_trace_now();
+            sync_iosurface(o->surface);
+        }
         if (tally && (o->entry[0] & 0xff) == OBJ_MAPPED_TEXTURE) {
             static uint32_t seen[256];
             uint32_t f = res[i * 2 + 1] & 0xff, key = res[i * 2] & 0xff;
@@ -2450,6 +2459,7 @@ typedef struct {
         }
         if (res[i * 2 + 1] & 4) sync_after = YES;
     }
+    if (capture) hv_scroll_trace_batch(capture, first_fallback);
     [blit endEncoding];
     /* Bit 1: this exec writes it, so the guest's copy is out of date from here on. Never
        upload that over what the GPU drew: mostly zeros, which show as black boxes. */
@@ -2565,6 +2575,17 @@ static const uint8_t *half_to_byte(void) {
     return t;
 }
 
+static id cursor_image_from_bgra(const uint8_t *bits, size_t w, size_t h, size_t stride) {
+    NSData *data = [NSData dataWithBytes:bits length:stride * h];
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGImageRef image = CGImageCreate(w, h, 8, 32, stride, cs, kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaPremultipliedFirst,
+                                     provider, NULL, false, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(cs);
+    CGDataProviderRelease(provider);
+    return CFBridgingRelease(image);
+}
+
 /* Op 4: a new pointer image in the kernel task's memory, premultiplied BGRA:
    {port, 0, offset, mapped length, stride, width, height, hot x, hot y, sum}. */
 - (void)cursorGlyph:(const uint32_t *)a length:(uint32_t)n {
@@ -2586,9 +2607,11 @@ static const uint8_t *half_to_byte(void) {
     ct.storageMode = MTLStorageModeShared;
     id<MTLTexture> glyph = [device newTextureWithDescriptor:ct];
     [glyph replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:bits bytesPerRow:(NSUInteger)stride];
+    id image = separate_cursor ? cursor_image_from_bgra(bits, w, h, (size_t)stride) : nil;
     os_unfair_lock_lock(&screen_lock);
     cursor = bits, cursor_w = w, cursor_h = h, cursor_stride = (uint32_t)stride, cursor_hot_x = hx, cursor_hot_y = hy;
     cursor_tex = glyph;
+    cursor_image = image;
     os_unfair_lock_unlock(&screen_lock);
     if (getenv("HV_PVG_CURSOR_LOG")) fprintf(stderr, "pvgcursor glyph %ux%u hot %d,%d stride %u first alpha %u\n", w, h, hx, hy, (uint32_t)stride, bits[(size_t)(h / 2) * stride + (size_t)(w / 2) * 4 + 3]);
     [self drawCursor];
@@ -2757,6 +2780,61 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
     dispatch_async(presenter, ^{ [self presentLoop]; });
 }
 
+/* The desktop layer uses resizeAspect. Clip the sprite to the same rectangle and
+   place its hotspot in guest mode coordinates, including when macOS scales the surface. */
+- (void)updateCursorLayer {
+    os_unfair_lock_lock(&screen_lock);
+    cursor_update_queued = NO;
+    CAMetalLayer *target = layer;
+    id image = cursor_image;
+    BOOL visible = cursor_visible && image && screen_tex;
+    uint32_t where = cursor_where, mw = cursor_mode_w, mh = cursor_mode_h;
+    uint32_t W = screen_w, H = screen_h, cw = cursor_w, ch = cursor_h;
+    int hx = cursor_hot_x, hy = cursor_hot_y;
+    os_unfair_lock_unlock(&screen_lock);
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (!target || !visible || !W || !H || CGRectIsEmpty(target.bounds)) {
+        [cursor_clip removeFromSuperlayer];
+    } else {
+        if (!cursor_clip) {
+            cursor_clip = [CALayer layer];
+            cursor_clip.masksToBounds = YES;
+            cursor_sprite = [CALayer layer];
+            [cursor_clip addSublayer:cursor_sprite];
+        }
+        if (cursor_clip.superlayer != target) [target addSublayer:cursor_clip];
+        CGRect bounds = target.bounds;
+        CGFloat fit = MIN(bounds.size.width / W, bounds.size.height / H);
+        CGSize size = CGSizeMake(W * fit, H * fit);
+        cursor_clip.frame = CGRectMake(CGRectGetMidX(bounds) - size.width / 2, CGRectGetMidY(bounds) - size.height / 2, size.width, size.height);
+        CGFloat kx = size.width / (mw ?: W), ky = size.height / (mh ?: H), scale = cursor_scale();
+        cursor_sprite.frame = CGRectMake(((where & 0xffff) - hx * scale) * kx, ((where >> 16) - hy * scale) * ky,
+                                         cw * scale * kx, ch * scale * ky);
+        NSNumber *sharp = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.cursor.sharp"];
+        cursor_sprite.magnificationFilter = cursor_sprite.minificationFilter = sharp && !sharp.boolValue ? kCAFilterLinear : kCAFilterNearest;
+        cursor_sprite.contents = image;
+    }
+    [CATransaction commit];
+}
+
+/* screen_lock held. Copy the guest state here so delayed UI work never reads guest RAM. */
+- (void)queueCursorLocked:(BOOL)force {
+    if (!separate_cursor) return;
+    const uint8_t *page = layer && screen_tex && !atomic_load(&stopping) ? hv_pvg_lite_display_page(lite) : NULL;
+    uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : UINT32_MAX;
+    BOOL visible = where != UINT32_MAX && (cursor_shown || page[0xe04]);
+    uint32_t mw = 0, mh = 0;
+    hv_pvg_lite_mode(&mw, &mh);
+    if (!force && where == cursor_where && visible == cursor_visible && mw == cursor_mode_w && mh == cursor_mode_h) return;
+    cursor_where = where; cursor_visible = visible;
+    cursor_mode_w = mw; cursor_mode_h = mh;
+    if (cursor_update_queued) return;
+    cursor_update_queued = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self updateCursorLayer]; });
+}
+
 - (void)showOnLayer:(uint64_t)mapping {
     HvObject *surface = hv_pvg_lite_old_driver(lite) ? [self currentSurface:mapping] : (surfaces[@(mapping)] ?: [self newSurface:mapping]); /* not met yet: a resumed machine's screen */
     if (!surface) { [self complain:[NSString stringWithFormat:@"swap to unknown surface %llu", mapping]]; return; }
@@ -2778,18 +2856,21 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         if (!surface->scanout) { [self complain:[NSString stringWithFormat:@"no scanout for surface %llu, row %llu", mapping, surface->row]]; return; }
     }
     os_unfair_lock_lock(&screen_lock);
+    BOOL resized = !screen_tex || surface->surface_w != screen_w || surface->surface_h != screen_h;
     screen_tex = surface->scanout, screen_half = half, screen_w = surface->surface_w, screen_h = surface->surface_h;
     screen_dirty = YES;
+    [self queueCursorLocked:resized];
     [self kickPresenter:YES];
     os_unfair_lock_unlock(&screen_lock);
 }
 
-/* The pointer moved or changed: the screen again, with no need to go through the GPU queue's worker. */
+/* A cursor-only update can bypass the guest GPU worker. */
 - (void)screenChanged {
     os_unfair_lock_lock(&screen_lock);
     if (screen_tex) {
-        screen_dirty = YES;
-        [self kickPresenter:YES];
+        if (separate_cursor) [self queueCursorLocked:YES];
+        else screen_dirty = YES;
+        if (screen_dirty) [self kickPresenter:YES];
     }
     os_unfair_lock_unlock(&screen_lock);
 }
@@ -2893,7 +2974,7 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         const uint8_t *page = hv_pvg_lite_display_page(lite);
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
-        if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
+        if (!separate_cursor && ctex && where != 0xffffffff && (shown || page[0xe04])) {
             /* The pointer is placed and sized in the display mode's pixels, like a hardware cursor plane; with a scaled
                resolution chosen in macOS the surface is another size, and both go by the ratio (else the pointer
                drifts away from where macOS has it, more the further from the top left corner). */
@@ -2938,6 +3019,12 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         // returned must not be followed by a commit to its old target.
         os_unfair_lock_lock(&screen_lock);
         if (layer_generation == generation && layer == target) {
+            uint64_t capture = hv_scroll_trace_active();
+            if (capture) {
+                [drawable addPresentedHandler:^(id<MTLDrawable> shown) {
+                    if (shown.presentedTime > 0) hv_scroll_trace_frame(capture, (uint64_t)(shown.presentedTime * 1e9));
+                }];
+            }
             [cb presentDrawable:drawable];
             [cb commit];
             gpu_frames++;
@@ -3058,6 +3145,7 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
         r->complaints = [NSMutableSet new];
         r->shot = getenv("HV_PVG_SHOT");
         cp_start(r);
+        r->separate_cursor = TARGET_OS_IOS && !cp.on && !getenv("HV_PVG_CURSOR_IN_FRAME");
         [r openArchive];
 #if !TARGET_OS_IPHONE
         if (getenv("HV_PVG_GPU_TEST")) r->layer = [CAMetalLayer layer];
@@ -3087,6 +3175,7 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
         if (cp.timer) { dispatch_source_cancel(cp.timer); cp.timer = nil; }
         os_unfair_lock_lock(&r->screen_lock);
         r->layer = nil;
+        [r queueCursorLocked:YES];
         r->layer_generation++;
         r->screen_dirty = NO;
         os_unfair_lock_unlock(&r->screen_lock);
@@ -3196,6 +3285,7 @@ void hv_pvg_metal_set_layer(HvPvgMetal *m, void *layer) {
     os_unfair_lock_lock(&r->screen_lock);
     r->layer_generation++; /* reattaching the same layer also wakes a stopped presenter */
     r->layer = l;
+    [r queueCursorLocked:YES];
     r->drawable_retry_pending = NO;
     r->drawable_retry_deadline = r->drawable_retry_cooldown = 0;
     r->screen_dirty = YES;
@@ -3417,12 +3507,14 @@ void hv_pvg_metal_set_display_state(HvPvgMetal *m, const void *in, size_t len) {
                 glyph = [r->device newTextureWithDescriptor:ct];
                 [glyph replaceRegion:MTLRegionMake2D(0, 0, d.cursor_w, d.cursor_h) mipmapLevel:0 withBytes:copy bytesPerRow:d.cursor_stride];
             }
+            id image = copy && r->separate_cursor ? cursor_image_from_bgra(copy, d.cursor_w, d.cursor_h, d.cursor_stride) : nil;
             os_unfair_lock_lock(&r->screen_lock);
             if (copy) {
                 free(r->cursor);
                 r->cursor = copy, r->cursor_w = d.cursor_w, r->cursor_h = d.cursor_h, r->cursor_stride = d.cursor_stride;
                 r->cursor_hot_x = d.hot_x, r->cursor_hot_y = d.hot_y;
                 r->cursor_tex = glyph;
+                r->cursor_image = image;
             }
             r->cursor_shown = d.cursor_shown != 0;
             os_unfair_lock_unlock(&r->screen_lock);

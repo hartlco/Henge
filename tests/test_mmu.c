@@ -242,6 +242,41 @@ int main(void) {
         }
     }
 
+    /* Unaligned ranges can wrap the slot index or end at the top of the VA space.
+       Populate each access tag alone so the test also covers execute-only pages. */
+    {
+        const uint64_t page = 1ull << HV_TLB_PAGE_BITS;
+        const uint64_t bases[] = {0xfffffe0040000000ull - 3 * page, 0ull - 8192 * page};
+        int layout = hv_tlb_tmajor;
+        for (int tmajor = 0; tmajor <= 1; tmajor++) {
+            hv_tlb_tmajor = tmajor;
+            for (unsigned b = 0; b < sizeof bases / sizeof *bases; b++) {
+                const int offsets[] = {-1, 0, 4, 8191, 8192};
+                for (unsigned k = 0; k < sizeof offsets / sizeof *offsets; k++) {
+                    uint64_t va = bases[b] + offsets[k] * page;
+                    uint64_t tag = (va & 0x00ffffffffffffffull) | 0xb400000000000000ull;
+                    for (int table = 0; table < 3; table++) {
+                        HvTlbEntry *e = hv_tlb_ent(&cpu, (va / page) & (HV_TLB_SIZE - 1), table);
+                        memset(e, 0x80, sizeof *e);
+                        e->addend = 0x100000;
+                        if (table == 0) e->read_tag = tag - HV_TLB_ADJ;
+                        if (table == 1) e->write_tag = tag - HV_TLB_ADJ;
+                        if (table == 2) e->exec_tag = hv_exec_key(tag, e->addend);
+                        hv_tlb_flush_kernel_range(&cpu, bases[b] + 4096, 8192 * page - 4096);
+                        int gone = e->read_tag == HV_TLB_INVALID && e->write_tag == HV_TLB_INVALID && e->exec_tag == HV_TLB_INVALID;
+                        checks++;
+                        if (gone != (offsets[k] >= 0 && offsets[k] < 8192)) {
+                            printf("  FAIL kernel range at %llx, offset %d, table %d, layout %d\n",
+                                   (unsigned long long)bases[b], offsets[k], table, tmajor);
+                            failures++;
+                        }
+                    }
+                }
+            }
+        }
+        hv_tlb_tmajor = layout;
+    }
+
     /* A TLBI by VA and ASID forgets the indirect-branch cache entries of that page
        for that address space, and nothing else. Entries are filled the way the dispatcher does it. */
     {

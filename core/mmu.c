@@ -5,6 +5,7 @@
 
 #include "exception.h"
 #include "machine.h"
+#include "scroll_trace.h"
 
 /* VMSAv8-64 stage 1 translation for the EL1&0 regime, 4 KB, 16 KB and 64 KB
    granules, 48-bit VA and PA. There is no stage 2: HengeVM is the hypervisor. */
@@ -348,6 +349,17 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     }
 }
 
+static void flush_kernel_entry(HvTlbEntry *e, uint64_t lo, uint64_t span) {
+    uint64_t tag;
+    if (e->read_tag != HV_TLB_INVALID) tag = e->read_tag + HV_TLB_ADJ;
+    else if (e->exec_tag != HV_TLB_INVALID) tag = hv_exec_key(e->exec_tag, e->addend);
+    else if (e->write_tag != HV_TLB_INVALID) tag = e->write_tag + HV_TLB_ADJ;
+    else return;
+    if (!((tag >> 55) & 1)) return; /* a process's page */
+    uint64_t pg = tag & 0x00ffffffffffffffull;
+    if (((pg - lo) & 0x00ffffffffffffffull) < span) memset(e, 0x80, sizeof *e);
+}
+
 /* A big range of kernel VAs. A full flush here also dropped every process's entries and both halves of the branch
    caches, and macOS 27 sends ranges like this hundreds of times a second (a phone running it did 120-260 full flushes a
    second, Sequoia none). Up to 64 MB page by page, as small ranges are; past that, a scan for kernel entries in the range
@@ -355,21 +367,38 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
     uint64_t first = va & ~(uint64_t)PAGE_MASK;
+    uint64_t span = len + (va - first);
     if (len <= (4096ull << HV_TLB_PAGE_BITS)) {
-        for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
+        for (uint64_t off = 0; off < span; off += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, first + off, -1);
         return;
     }
-    uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
-    for (int t = 0; t < 3; t++)
-        for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
-            HvTlbEntry *e = hv_tlb_ent(cpu, i, t);
-            if (e->read_tag == HV_TLB_INVALID && e->exec_tag == HV_TLB_INVALID && e->write_tag == HV_TLB_INVALID) continue;
-            uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
-            if (!((tag >> 55) & 1)) continue; /* a process's page */
-            uint64_t pg = tag & 0x00ffffffffffffffull;
-            if (pg < hi && pg + PAGE_MASK + 1 > lo) memset(e, 0x80, sizeof *e);
+    uint64_t capture = hv_scroll_trace_active();
+    uint64_t since = capture ? hv_scroll_trace_now() : 0;
+    const uint64_t lo = first & 0x00ffffffffffffffull;
+    uint64_t pages = (span + PAGE_MASK) >> HV_TLB_PAGE_BITS;
+    uint32_t count = pages < HV_TLB_SIZE ? (uint32_t)pages : HV_TLB_SIZE;
+    uint32_t slot = count == HV_TLB_SIZE ? 0 : (uint32_t)(first >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
+    /* Consecutive pages occupy consecutive slots, wrapping at the end of the cache. */
+    while (count) {
+        uint32_t n = count < HV_TLB_SIZE - slot ? count : HV_TLB_SIZE - slot;
+        if (hv_tlb_tmajor) {
+            for (int t = 0; t < 3; t++) {
+                HvTlbEntry *entries = hv_tlb_ent(cpu, slot, t);
+                for (uint32_t i = 0; i < n; i++) flush_kernel_entry(&entries[i], lo, span);
+            }
+        } else {
+            for (uint32_t i = slot; i < slot + n; i++) {
+                HvTlbEntry *entries = &cpu->tlb[4 * i];
+                flush_kernel_entry(entries, lo, span);
+                flush_kernel_entry(entries + 1, lo, span);
+                flush_kernel_entry(entries + 2, lo, span);
+            }
         }
+        count -= n;
+        slot = 0;
+    }
     hv_ijc_reset(cpu, 1);
+    if (capture) hv_scroll_trace_range(capture, since);
 }
 
 /* A page just got translated code: writes to it must take the slow path from now

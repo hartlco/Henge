@@ -4,7 +4,7 @@ CFLAGS = -std=c11 -Wall -Wextra -O3 -g -Icore -Ihost -Idevices
 B = build
 
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
-       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o
+       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o $(B)/scroll_trace.o
 HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/cfg.o $(B)/bdif.o $(B)/pcie.o \
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o $(B)/virtio_usb.o $(B)/virtio_balloon.o $(B)/xhci.o $(B)/vmapple.o $(B)/aes.o $(B)/pl061.o $(B)/metallib.o
@@ -231,6 +231,13 @@ $(B)/install.o: host/install.c host/*.h devices/*.h | $(B)
 	$(CC) $(CFLAGS) $(RESTORE_CFLAGS) -c $< -o $@
 restore-objs: $(RESTORE_OBJ)
 .PHONY: restore-objs
+
+$(B)/test_scroll_fingers: ios/Henge/ScrollFingers.swift ios/Henge/ScrollWheel.swift tests/test_scroll_fingers.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-scroll: $(B)/test_scroll_fingers
+	$(B)/test_scroll_fingers
+.PHONY: test-scroll
 
 # Session-owned display routing, independent of JIT, Metal and a connected monitor.
 $(B)/test_display_targets: ios/Henge/DisplayTargetSelection.swift tests/test_display_targets.swift | $(B)
