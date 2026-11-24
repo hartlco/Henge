@@ -577,7 +577,7 @@ HENGE_EXPORT int henge_ios_take_high_room(void **base, size_t *bytes)
    place only 0x7A-0x7B is free, less the JIT region's writable view when that lands there (2.5 GB on an iPad Pro M5). */
 HENGE_EXPORT void henge_ios_release_high_room(void)
 {
-    if (g_high_hold_given || !g_high_hold[0]) return;
+    if (g_high_hold_given || !(g_high_hold[0] || g_high_hold[1] || g_high_hold[2])) return;
     henge_ios_release_high_hold();
     HENGE_LOG("high hold released for the virtual Mac's memory");
 }
