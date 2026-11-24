@@ -292,6 +292,40 @@ static float hv_half_shown(float v, int mode) { /* what the screen shows for a h
 
 #include "pvg_colorprobe.h" /* HV_COLOR_PROBE: what the display is told and shown, for chasing colour problems */
 
+static kern_return_t remap_pages(vm_address_t to, uint8_t *src, uint64_t size) {
+    vm_prot_t cur, max;
+    return vm_remap(mach_task_self(), &to, size, 0, VM_FLAGS_OVERWRITE, mach_task_self(),
+                    (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
+}
+
+/* Leave holes zero-filled. Consecutive guest pages in one RAM region can share a remap. */
+static kern_return_t map_guest_pages(HvPvgLite *lite, vm_address_t base, uint32_t *pages, uint64_t n) {
+    kern_return_t result = KERN_SUCCESS;
+    for (uint64_t i = 0; i < n;) {
+        uint64_t end = i + 1;
+        while (end < n && pages[i] && pages[end] == pages[end - 1] + 1) end++;
+        if (end - i > 1) {
+            uint64_t size = (end - i) << 14;
+            uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)pages[i] << 14, size);
+            if (src && remap_pages(base + (i << 14), src, size) == KERN_SUCCESS) {
+                i = end;
+                continue;
+            }
+        }
+        /* A run can cross RAM regions or host mappings that must be remapped separately. */
+        for (; i < end; i++) {
+            uint8_t *src = pages[i] ? hv_pvg_lite_page(lite, pages[i]) : NULL;
+            if (!src) {
+                pages[i] = 0;
+                continue;
+            }
+            kern_return_t kr = remap_pages(base + (i << 14), src, 0x4000);
+            if (kr != KERN_SUCCESS) result = kr;
+        }
+    }
+    return result;
+}
+
 /* A contiguous view of a task's guest pages; holes are left as zero pages. */
 /* A range of task memory at one address, page by page. Metal pins a buffer's
    pages when the buffer is made, so a mapping never changes under a buffer: when
@@ -301,23 +335,18 @@ static BOOL map_pages(HvReplay *r, uint32_t task, HvObject *o) {
     uint64_t n = (o->length + 0x3fff) >> 14;
     vm_address_t base = 0;
     if (vm_allocate(mach_task_self(), &base, n << 14, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NO;
-    uint32_t *pages = calloc(n, 4);
+    uint32_t *pages = calloc(n, sizeof *pages);
+    if (!pages) {
+        vm_deallocate(mach_task_self(), base, n << 14);
+        return NO;
+    }
     hv_pvg_lite_task_pages(r->lite, task, o->vpage, n, pages);
-    for (uint64_t i = 0; i < n; i++) {
-        uint8_t *src = pages[i] ? hv_pvg_lite_page(r->lite, pages[i]) : NULL;
-        if (!src) {
-            pages[i] = 0;
-            continue;
-        }
-        vm_address_t to = base + (i << 14);
-        vm_prot_t cur, max;
-        kern_return_t kr = vm_remap(mach_task_self(), &to, 0x4000, 0, VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
-        if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "hengevm: pvg-metal: vm_remap failed: %d\n", kr);
-            vm_deallocate(mach_task_self(), base, n << 14);
-            free(pages);
-            return NO;
-        }
+    kern_return_t kr = map_guest_pages(r->lite, base, pages, n);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "hengevm: pvg-metal: vm_remap failed: %d\n", kr);
+        vm_deallocate(mach_task_self(), base, n << 14);
+        free(pages);
+        return NO;
     }
     free(o->pages);
     o->pages = pages;
@@ -1272,14 +1301,13 @@ static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, u
         return nil;
     }
     surface->mapped = (uint8_t *)base;
-    for (uint64_t i = 0; i < n; i++) {
-        uint32_t page = surface_page_entry(lite, list, n, i);
-        if (!page) continue;
-        uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)(page >> 2) << 14, 0x4000);
-        if (!src) continue;
-        vm_address_t to = base + (i << 14);
-        vm_prot_t cur, max;
-        vm_remap(mach_task_self(), &to, 0x4000, 0, VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
+    uint32_t pages[256];
+    for (uint64_t i = 0; i < n;) {
+        uint64_t count = MIN(n - i, sizeof pages / sizeof pages[0]);
+        for (uint64_t k = 0; k < count; k++)
+            pages[k] = surface_page_entry(lite, list, n, i + k) >> 2;
+        map_guest_pages(lite, base + (i << 14), pages, count);
+        i += count;
     }
     surface->object = [device newBufferWithBytesNoCopy:surface->mapped length:surface->length options:MTLResourceStorageModeShared
                                            deallocator:^(void *at, NSUInteger size) { vm_deallocate(mach_task_self(), (vm_address_t)at, size); }];
