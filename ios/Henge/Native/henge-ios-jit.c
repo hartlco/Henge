@@ -531,6 +531,7 @@ static const struct { uint64_t at, bytes; } g_high_parts[3] = {
 static vm_address_t g_high_hold[3];
 static bool g_high_hold_given;
 
+#ifndef HENGE_FULL_MACOS_ONLY
 static void henge_ios_hold_high(void)
 {
     for (int i = 0; i < 3; i++) {
@@ -545,6 +546,7 @@ static void henge_ios_hold_high(void)
                   (unsigned long long)(g_high_parts[i].bytes >> 30), mach_error_string(kr));
     }
 }
+#endif
 
 static void henge_ios_release_high_hold(void)
 {
@@ -591,7 +593,10 @@ HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes)
         return henge_prewarmed.rw_addr != NULL;
     }
     henge_prewarm_done = true;
+#ifndef HENGE_FULL_MACOS_ONLY
+    /* Reserve these ranges only for the standalone Mac app runtime. Guest RAM needs the high address space. */
     henge_ios_hold_high();
+#endif
     henge_prewarmed = henge_ios_jit_allocate_real(bytes);
     fprintf(stderr, "[henge-jit] prewarm %s: %zu bytes\n",
             henge_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
