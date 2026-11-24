@@ -546,6 +546,56 @@ static void test_guest_programs(void) {
     }
 }
 
+/* Run after the uniprocessor tests, with a second CPU attached to the same GIC. */
+static void test_gic_routing(void) {
+    static HvCpu second;
+    hv_cpu_reset_index(&second, &m, 1);
+    second.mpidr = 1;
+    HvCpu *cpus[] = {&cpu, &second};
+    wr32(VMAPPLE_GIC_DIST, 2);
+    for (int i = 32; i < HV_GIC_NUM_IRQS; i += 32)
+        wr32(VMAPPLE_GIC_DIST + 0x180 + i / 8, UINT32_MAX);
+    for (int c = 0; c < 2; c++) {
+        uint64_t bank = VMAPPLE_GIC_REDIST + (c << 17) + 0x10000;
+        wr32(bank + 0x180, UINT32_MAX);
+        wr32(bank + 0x80, 1u << 5);
+        wr32(bank + 0x100, 1u << 5);
+        m.icc_write(&m, cpus[c], ICC_PMR, 0xff);
+        m.icc_write(&m, cpus[c], ICC_IGRPEN1, 1);
+    }
+    m.icc_write(&m, &cpu, ICC_SGI1R, 5ull << 24 | 3);
+    check("SGI reaches both named targets", m.percpu[0].irq_line && m.percpu[1].irq_line, 1);
+    check("second CPU acknowledges its SGI", m.icc_read(&m, &second, ICC_IAR1), 5);
+    m.icc_write(&m, &second, ICC_EOIR1, 5);
+    check("first CPU still has its SGI", m.percpu[0].irq_line, 1);
+    check("second CPU finished its SGI", m.percpu[1].irq_line, 0);
+    check("first CPU acknowledges its SGI", m.icc_read(&m, &cpu, ICC_IAR1), 5);
+    m.icc_write(&m, &cpu, ICC_EOIR1, 5);
+
+    const uint64_t route = VMAPPLE_GIC_DIST + 0x6000 + 8 * 48;
+    wr32(VMAPPLE_GIC_DIST + 0x84, 1u << 16);
+    wr32(VMAPPLE_GIC_DIST + 0x104, 1u << 16);
+    for (int split = 0; split <= 1; split++) {
+        wr64(route, 0);
+        m.icc_write(&m, &second, ICC(3, 0, 12, 12, 4), split << 1);
+        hv_gicv3_set_irq(board.gic, 48, 1);
+        check("pending SPI starts on first CPU", m.percpu[0].irq_line, 1);
+        wr64(route, 1);
+        check("pending SPI leaves old route", m.percpu[0].irq_line, 0);
+        check("pending SPI raises new route", m.percpu[1].irq_line, 1);
+        check("second CPU acknowledges SPI", m.icc_read(&m, &second, ICC_IAR1), 48);
+        wr64(route, 0);
+        check("active SPI stays masked on new route", m.percpu[0].irq_line, 0);
+        m.icc_write(&m, &second, ICC_EOIR1, 48);
+        if (split) {
+            check("priority drop keeps SPI active", m.percpu[0].irq_line, 0);
+            m.icc_write(&m, &second, ICC(3, 0, 12, 11, 1), 48);
+        }
+        check("deactivation exposes level on new route", m.percpu[0].irq_line, 1);
+        hv_gicv3_set_irq(board.gic, 48, 0);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (hv_machine_init(&m, 4 << 20) != 0) return 1;
@@ -595,6 +645,7 @@ int main(void) {
     wr32(VMAPPLE_GPIO + 0x41c, 1u << 3);
     check("gpio interrupt cleared", board.gic->level[32 + VMAPPLE_IRQ_GPIO], 0);
     test_guest_programs();
+    test_gic_routing();
 
     hv_disk_close(&root);
     hv_disk_close(&aux);

@@ -17,8 +17,6 @@
 #define R(op0, op1, crn, crm, op2) ((op0) << 14 | (op1) << 11 | (crn) << 7 | (crm) << 3 | (op2))
 
 /* INTID i's state as CPU c sees it: banked below 32, shared above. */
-void hv_gicv3_update(HvGic *g);
-
 #define F(g, c, field, i) (*((i) < 32 ? &(g)->cpu[c].field[i] : &(g)->field[i]))
 
 static int ncpus(HvGic *g) {
@@ -74,16 +72,18 @@ static int hppi(HvGic *g, int c, int masked) {
     return best;
 }
 
-static void hv_gicv3_update_body(HvGic *g) {
-    for (int c = 0; c < ncpus(g); c++) {
-        int i = hppi(g, c, 1);
-        HvPerCpu *p = &g->m->percpu[c];
-        int irq = i != SPURIOUS && F(g, c, group, i) == 1, fiq = i != SPURIOUS && F(g, c, group, i) == 0;
-        int raised = (irq && !p->irq_line) || (fiq && !p->fiq_line);
-        p->irq_line = irq;
-        p->fiq_line = fiq;
-        if (raised && g->m->cpus[c] && g->m->ncpus > 1) hv_cpu_wake(g->m->cpus[c]); /* it may be asleep in WFI, or running */
-    }
+static void update_cpu_line(HvGic *g, int c) {
+    int i = hppi(g, c, 1);
+    HvPerCpu *p = &g->m->percpu[c];
+    int irq = i != SPURIOUS && F(g, c, group, i) == 1, fiq = i != SPURIOUS && F(g, c, group, i) == 0;
+    int raised = (irq && !p->irq_line) || (fiq && !p->fiq_line);
+    p->irq_line = irq;
+    p->fiq_line = fiq;
+    if (raised && g->m->cpus[c] && g->m->ncpus > 1) hv_cpu_wake(g->m->cpus[c]); /* it may be asleep in WFI, or running */
+}
+
+static void update_all_lines(HvGic *g) {
+    for (int c = 0; c < ncpus(g); c++) update_cpu_line(g, c);
 }
 
 static void hv_gicv3_set_irq_body(HvGic *g, int intid, int level) {
@@ -92,7 +92,7 @@ static void hv_gicv3_set_irq_body(HvGic *g, int intid, int level) {
     if (g->level[intid] == level) return; /* nothing changed: skip the rescan */
     if (g->edge[intid] && level) g->latch[intid] = 1;
     g->level[intid] = (uint8_t)level;
-    hv_gicv3_update(g);
+    update_all_lines(g);
 }
 
 static void hv_gicv3_set_ppi_body(HvGic *g, int c, int intid, int level) {
@@ -102,13 +102,13 @@ static void hv_gicv3_set_ppi_body(HvGic *g, int c, int intid, int level) {
     if (k->level[intid] == level) return; /* the timer re-asserts every tick */
     if (k->edge[intid] && level) k->latch[intid] = 1;
     k->level[intid] = (uint8_t)level;
-    hv_gicv3_update(g);
+    update_all_lines(g);
 }
 
 static void hv_gicv3_pend_body(HvGic *g, int intid) {
     if (intid < 32 || intid >= HV_GIC_NUM_IRQS) return;
     g->latch[intid] = 1;
-    hv_gicv3_update(g);
+    update_all_lines(g);
 }
 
 /* ---- the CPU interface ---- */
@@ -120,7 +120,7 @@ static uint64_t acknowledge(HvGic *g, int c, int grp) {
     F(g, c, latch, i) = 0;
     HvGicCpu *k = &g->cpu[c];
     if (k->depth < 32) k->stack[k->depth++] = (HvGicActive){(uint16_t)i, F(g, c, priority, i), (uint8_t)grp};
-    hv_gicv3_update(g);
+    update_cpu_line(g, c); /* an acknowledged SPI was already routed to c */
     return (uint64_t)i;
 }
 
@@ -129,7 +129,11 @@ static void end_of_interrupt(HvGic *g, int c, int intid) {
     HvGicCpu *k = &g->cpu[c];
     if (k->depth) k->depth--; /* priority drop: the most recent acknowledge */
     if (!(k->icc_ctlr & 2)) F(g, c, active, intid) = 0; /* EOImode 0 also deactivates */
-    hv_gicv3_update(g);
+    update_cpu_line(g, c);
+    if (intid >= 32 && !(k->icc_ctlr & 2)) {
+        int target = target_of(g, intid); /* the guest can reroute an active SPI */
+        if (target != c) update_cpu_line(g, target);
+    }
 }
 
 static uint64_t icc_read_body(HvMachine *m, HvCpu *cpu, uint32_t reg) {
@@ -166,10 +170,14 @@ static void icc_write_body(HvMachine *m, HvCpu *cpu, uint32_t reg, uint64_t v) {
     HvGicCpu *k = &g->cpu[c];
     switch (reg) {
     case R(3, 0, 4, 6, 0): k->pmr = v & 0xff; break;
-    case R(3, 0, 12, 12, 1): case R(3, 0, 12, 8, 1): end_of_interrupt(g, c, (int)(v & 0xffffff)); break; /* EOIR1/0 */
+    case R(3, 0, 12, 12, 1): case R(3, 0, 12, 8, 1): end_of_interrupt(g, c, (int)(v & 0xffffff)); return; /* EOIR1/0 */
     case R(3, 0, 12, 11, 1):                                           /* DIR */
-        if ((v & 0xffffff) < HV_GIC_NUM_IRQS) F(g, c, active, (int)(v & 0xffffff)) = 0;
-        break;
+        if ((v & 0xffffff) < HV_GIC_NUM_IRQS) {
+            int id = (int)(v & 0xffffff);
+            F(g, c, active, id) = 0;
+            update_cpu_line(g, id < 32 ? c : target_of(g, id));
+        }
+        return;
     case R(3, 0, 12, 8, 3): k->bpr0 = v & 7; break;
     case R(3, 0, 12, 12, 3): k->bpr1 = v & 7; break;
     case R(3, 0, 12, 12, 4): k->icc_ctlr = v & 3; break;              /* CBPR, EOImode */
@@ -185,13 +193,16 @@ static void icc_write_body(HvMachine *m, HvCpu *cpu, uint32_t reg, uint64_t v) {
         for (int t = 0; t < ncpus(g); t++) {
             uint64_t mp = m->cpus[t] ? m->cpus[t]->mpidr & 0xffffff : (uint64_t)t;
             int hit = irm ? t != c : aff == (mp >> 8) && rs == (mp & 0xff) >> 4 && ((v >> (mp & 0xf)) & 1);
-            if (hit) g->cpu[t].latch[intid] = 1;
+            if (hit) {
+                g->cpu[t].latch[intid] = 1;
+                update_cpu_line(g, t);
+            }
         }
-        break;
+        return;
     }
-    default: break;
+    default: return;
     }
-    hv_gicv3_update(g);
+    update_cpu_line(g, c);
 }
 
 /* ---- MMIO: bitmap, byte and route registers shared by GICD and GICR ---- */
@@ -296,7 +307,7 @@ static int bank0(uint32_t a) {
 
 static uint64_t dist_read_body(void *opaque, uint64_t off, unsigned size) {
     HvGic *g = opaque;
-    if (off >= 0x6100 && off < 0x6100 + 8 * HV_GIC_NUM_IRQS) { /* IROUTER<n>, n >= 32 */
+    if (off >= 0x6100 && off < 0x6000 + 8 * HV_GIC_NUM_IRQS) { /* IROUTER<n>, n >= 32 */
         uint64_t v = g->route[(off - 0x6000) / 8];
         return size == 8 ? v : (uint32_t)(v >> ((off & 4) * 8));
     }
@@ -315,11 +326,18 @@ static uint64_t dist_read_body(void *opaque, uint64_t off, unsigned size) {
 
 static void dist_write_body(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     HvGic *g = opaque;
-    if (off >= 0x6100 && off < 0x6100 + 8 * HV_GIC_NUM_IRQS) {
-        uint64_t *r = &g->route[(off - 0x6000) / 8];
+    if (off >= 0x6100 && off < 0x6000 + 8 * HV_GIC_NUM_IRQS) {
+        int id = (int)((off - 0x6000) / 8);
+        uint64_t *r = &g->route[id];
+        int old = target_of(g, id);
         if (size == 8) *r = v;
         else if (off & 4) *r = (*r & 0xffffffffull) | v << 32;
         else *r = (*r & ~0xffffffffull) | (uint32_t)v;
+        int target = target_of(g, id);
+        if (old != target) {
+            update_cpu_line(g, old);
+            update_cpu_line(g, target);
+        }
         return;
     }
     uint32_t a = (uint32_t)off & ~3u, mask = size_mask(off, size);
@@ -329,7 +347,7 @@ static void dist_write_body(void *opaque, uint64_t off, uint64_t v, unsigned siz
     } else if (a >= 0x80 && a < 0x1000) {
         if (!bank0(a)) bank_write(g, 0, a, word, mask, 0, HV_GIC_NUM_IRQS, 0);
     }
-    hv_gicv3_update(g);
+    update_all_lines(g);
 }
 
 /* One redistributor per CPU, 128 KB apart: RD_base at 0, SGI_base at 0x10000. */
@@ -375,14 +393,14 @@ static void redist_write_body(void *opaque, uint64_t off, uint64_t v, unsigned s
     uint32_t a = (uint32_t)(off - 0x10000) & ~3u, mask = size_mask(off, size);
     uint32_t word = (uint32_t)(v << ((off & 3) * 8));
     if (a >= 0x80 && a < 0x1000 && bank0(a)) bank_write(g, c, a, word, mask, 0, 32, 1);
-    hv_gicv3_update(g);
+    update_cpu_line(g, c);
 }
 
-/* Every way in takes the GIC's own lock (recursive: the bodies call hv_gicv3_update).
+/* Every way in takes the GIC's own lock.
    Devices call in holding the device lock; the CPUs' ICC registers and timers do not need it. */
 void hv_gicv3_update(HvGic *g) {
     pthread_mutex_lock(&g->mu);
-    hv_gicv3_update_body(g);
+    update_all_lines(g);
     pthread_mutex_unlock(&g->mu);
 }
 
@@ -450,10 +468,7 @@ static void redist_write(void *opaque, uint64_t off, uint64_t v, unsigned size) 
 
 HvGic *hv_gicv3_create(HvMachine *m, uint64_t dist_pa, uint64_t redist_pa) {
     HvGic *g = calloc(1, sizeof *g);
-    pthread_mutexattr_t ra;
-    pthread_mutexattr_init(&ra);
-    pthread_mutexattr_settype(&ra, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&g->mu, &ra);
+    pthread_mutex_init(&g->mu, NULL);
     g->m = m;
     for (int c = 0; c < HV_MAX_CPUS; c++) {
         g->cpu[c].waker = 6; /* ProcessorSleep and ChildrenAsleep until the guest wakes it */
