@@ -207,7 +207,6 @@ final class HardwareMouse {
     private var recentSteps: [(t: CFTimeInterval, x: Int32, y: Int32)] = []
     private var heldSteps: [(x: Int32, y: Int32)] = []
     private var heldX: Int32 = 0, heldY: Int32 = 0
-    private var buttonsDown = 0
     private var dragging = false
     private static let undoWindow: CFTimeInterval = 0.06
     private static let undoLimit: Int32 = 6   // pixels: more than this before a press was meant
@@ -245,7 +244,6 @@ final class HardwareMouse {
     func stop() {
         PointerLock.set(false)
         releaseButtons()
-        scrollFingers.end()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         for mouse in mice {
@@ -261,11 +259,9 @@ final class HardwareMouse {
 
     func releaseButtons() {
         for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
-        buttonsDown = 0
-        dragging = false
-        heldSteps.removeAll()
-        heldX = 0
-        heldY = 0
+        recentSteps.removeAll()
+        resetDrag()
+        scrollFingers.end()
     }
 
     private func attach(_ mouse: GCMouse) {
@@ -293,7 +289,7 @@ final class HardwareMouse {
     }
 
     private func step(_ x: Int32, _ y: Int32) {
-        if buttonsDown > 0 && !dragging {
+        if !buttons.held.isEmpty && !dragging {
             heldSteps.append((x, y))
             heldX += x
             heldY += y
@@ -322,27 +318,28 @@ final class HardwareMouse {
     }
 
     private func button(_ physicalButton: Int32, _ pressed: Bool) {
+        let wasUp = buttons.held.isEmpty
         guard let guestButton = buttons.event(physicalButton, pressed: pressed) else { return }
         if buttonsLogged < 32 {
             buttonsLogged += 1
             HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up")")
         }
-        if pressed {
-            if buttonsDown == 0 {
-                steadyForPress()
-                dragging = false
-                heldSteps.removeAll()
-                heldX = 0
-                heldY = 0
-            }
-            buttonsDown += 1
-        } else {
-            buttonsDown = max(0, buttonsDown - 1)
-            // Released before it became a drag: what was held back was the finger wobbling, not meant.
-            if buttonsDown == 0 { heldSteps.removeAll(); heldX = 0; heldY = 0; dragging = false }
+        if pressed && wasUp {
+            resetDrag()
+            if !AbsolutePointer.inUse { steadyForPress() }
+        } else if !pressed && buttons.held.isEmpty {
+            recentSteps.removeAll()
+            resetDrag()
         }
         henge_vm_mouse_button(guestButton, pressed ? 1 : 0)
         if !pressed { StickyKeys.shared.releaseAll() }
+    }
+
+    private func resetDrag() {
+        dragging = false
+        heldSteps.removeAll()
+        heldX = 0
+        heldY = 0
     }
 
     /// GameController puts vertical motion on the first axis and horizontal on the second, as the fingers' travel

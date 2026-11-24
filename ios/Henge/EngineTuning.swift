@@ -16,10 +16,8 @@ enum EngineTuning {
         "HV_HZ": "60",         // the refresh rate macOS is told its display has
         "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
         "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
-        // On for devices: an iPad measured 11% more frames with accesses grouped (one TLB check for several on one
-        // base register) and far fewer display freezes with the refresh event (issue #164). The Mac tool leaves both off.
+        // An iPad measured 11% more frames with grouped accesses (one TLB check for several on one register, issue #164).
         "HV_GROUPS": "1",
-        "HV_PVG_VBLANK": "1",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
     ]
 
