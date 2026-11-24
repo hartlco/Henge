@@ -89,6 +89,8 @@ struct HvPvgLite {
     _Atomic(HvPvgMetal *) metal; /* release-published after the cached layer is applied */
     int metal_tried;
     uint32_t stamps_pending; /* channels Metal finished, for the next poll */
+    int vblank_enabled;
+    uint64_t next_vblank;
     uint64_t vblanks;        /* refresh events sent (HV_PVG_VBLANK) */
     uint64_t mapper_seen;    /* mapper entries handed over already (their unmaps given to Metal) */
     uint32_t mapper_waiting; /* mapper completions waiting for the GPU (do_mapper) */
@@ -750,20 +752,14 @@ void hv_pvg_lite_mapper_done(HvPvgLite *p, uint64_t index) {
    (on an iPhone, 20-48K interrupts and 40-80K process switches a second where a calm Mac has 3-7K). Without event 8
    a video wallpaper stops when nothing else draws. Sent at the mode's rate (HV_HZ). HV_PVG_VBLANK=0: neither, as before. */
 static void vblank(HvPvgLite *p) {
-    static int on = -1;
-    static uint64_t period, next;
-    if (on < 0) {
-        on = !getenv("HV_PVG_VBLANK") || atoi(getenv("HV_PVG_VBLANK"));
-        const char *hz = getenv("HV_HZ");
-        uint64_t r = hz && atoi(hz) > 0 ? (uint64_t)atoi(hz) : 60;
-        period = 24000000ull / r; /* host counter ticks (24 MHz) */
-    }
-    if (!on || !p->display_pa) return;
+    if (!p->vblank_enabled || !p->display_pa) return;
+    uint64_t now = mach_absolute_time();
+    if (now < p->next_vblank) return;
     uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
     if (!d) return;
-    uint64_t now = mach_absolute_time();
-    if (now < next) return;
-    next = now + period;
+    /* Use the mode this guest sees, including the mode in a restored display page. */
+    uint32_t hz = __atomic_load_n((uint32_t *)(d + 0x214), __ATOMIC_ACQUIRE) >> 16;
+    p->next_vblank = now + 24000000ull / (hz ? hz : 60);
     /* The time on the guest's own clock (its virtual counter, as mach_absolute_time reads it there), before the event. */
     __atomic_store_n((uint64_t *)(d + 0x68), now - p->m->cntvoff, __ATOMIC_RELEASE);
     if (!(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
@@ -843,6 +839,8 @@ HvPvgLite *hv_pvg_lite_create(HvMachine *m, HvGic *gic, uint64_t gfx_pa, uint64_
     p->gic = gic;
     p->gfx_irq = gfx_irq;
     p->iosfc_irq = iosfc_irq;
+    const char *vblank = getenv("HV_PVG_VBLANK");
+    p->vblank_enabled = !vblank || atoi(vblank);
     p->log = getenv("HV_PVG_LITE_LOG") != NULL;
     p->tally = getenv("HV_PVG_TALLY") != NULL;
     hv_machine_add_mmio(m, gfx_pa, 0x10000, p, gfx_read, gfx_write, "gfx");
