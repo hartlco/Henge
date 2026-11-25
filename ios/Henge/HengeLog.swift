@@ -35,6 +35,7 @@ enum HengeLog {
     /// Frame pointers for the crash backtrace, taken before they are needed.
     fileprivate static let crashFrames =
         UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: 64)
+    private static var nativeLogSource: DispatchSourceFileSystemObject?
     private static var pipeWriteFD: Int32 = -1
     /// HV_LOG_CONSOLE: a copy of the original stderr, so `devicectl device process launch --console` (and Xcode's
     /// console) can follow the log live. `colorprobe` (any text) mirrors only lines containing it; `all` mirrors everything.
@@ -169,38 +170,38 @@ enum HengeLog {
         dup2(pipeWriteFD, STDOUT_FILENO)
         dup2(pipeWriteFD, STDERR_FILENO)
 
-        let t = Thread {
-            var pending = Data()
-            var buf = [UInt8](repeating: 0, count: 16 * 1024)
-            while true {
-                let n = read(pipeReadFD, &buf, buf.count)
-                if n < 0 {
-                    if errno == EINTR { continue }
-                    break
-                }
-                // End of file, not end of stream: the writer is still open and
-                // more will arrive. A pipe blocked here; a file returns 0, so
-                // this is where the tail waits.
-                if n == 0 {
-                    usleep(40_000)
-                    continue
-                }
-                pending.append(contentsOf: buf[0..<n])
+        nativeLogSource = mirrorNativeLog(pipeReadFD) { emit($0, fromStream: true) }
+    }
 
-                // Emit complete lines only, so a partial write never splits a
-                // message across two log entries.
+    /// Read existing output after the watcher is registered, then group writes from the same burst.
+    private static func mirrorNativeLog(_ fd: Int32, emitLine: @escaping (String) -> Void) -> DispatchSourceFileSystemObject {
+        let queue = DispatchQueue(label: "com.henge.log.reader", qos: .utility)
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .extend, queue: queue)
+        var pending = Data()
+        var buf = [UInt8](repeating: 0, count: 16 * 1024)
+        func drain() {
+            while true {
+                let n = read(fd, &buf, buf.count)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 { return }
+                pending.append(contentsOf: buf[..<n])
                 while let nl = pending.firstIndex(of: 0x0A) {
-                    let lineData = pending.subdata(in: pending.startIndex..<nl)
-                    pending.removeSubrange(pending.startIndex...nl)
-                    if let line = String(data: lineData, encoding: .utf8) {
-                        emit(line, fromStream: true)
-                    }
+                    if let line = String(data: pending[..<nl], encoding: .utf8) { emitLine(line) }
+                    pending.removeSubrange(...nl)
                 }
             }
         }
-        t.name = "com.henge.log.reader"
-        t.qualityOfService = .userInitiated
-        t.start()
+
+        source.setRegistrationHandler { drain() }
+        source.setEventHandler {
+            source.suspend()
+            queue.asyncAfter(deadline: .now() + .milliseconds(40)) {
+                drain()
+                source.resume()
+            }
+        }
+        source.activate()
+        return source
     }
 
     /// Turn "the app vanished with no crash log" into a labelled last line.
