@@ -53,6 +53,7 @@ static Slirp *slirp;
 static HvVirtioNet *net;
 static HvMachine *machine;
 static Queue to_guest, to_host;
+static int rx_wake_pending; /* under to_guest.mu */
 static int wake_pipe[2] = {-1, -1};
 static pthread_t network_thread;
 static int thread_started, queues_initialized;
@@ -70,8 +71,7 @@ void hv_net_set_share_socket(const char *path) {
 
 enum PushResult { PUSH_DROPPED, PUSH_APPENDED, PUSH_FIRST };
 
-static enum PushResult push(Queue *q, const uint8_t *data, uint32_t len) {
-    pthread_mutex_lock(&q->mu);
+static enum PushResult push_locked(Queue *q, const uint8_t *data, uint32_t len) {
     uint32_t depth = q->tail - q->head;
     enum PushResult result = PUSH_DROPPED;
     if (depth < QUEUE) {
@@ -84,7 +84,6 @@ static enum PushResult push(Queue *q, const uint8_t *data, uint32_t len) {
             result = depth ? PUSH_APPENDED : PUSH_FIRST;
         }
     }
-    pthread_mutex_unlock(&q->mu);
     return result;
 }
 
@@ -114,13 +113,22 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* One outstanding wake is enough to get CPU 0 to poll the receive queue. */
+static void enqueue_to_guest(const uint8_t *data, uint32_t len) {
+    pthread_mutex_lock(&to_guest.mu);
+    int wake = push_locked(&to_guest, data, len) && !rx_wake_pending;
+    if (wake) rx_wake_pending = 1;
+    pthread_mutex_unlock(&to_guest.mu);
+    if (wake) hv_machine_wake(machine);
+}
+
 /* ---- slirp callbacks (all on the network thread) ---- */
 
 static slirp_ssize_t send_packet(const void *buf, size_t len, void *opaque) {
     (void)opaque;
     if (len > MAX_FRAME) return (slirp_ssize_t)len;
     log_frame("rx", buf, (uint32_t)len);
-    if (push(&to_guest, buf, (uint32_t)len)) hv_machine_wake(machine);
+    enqueue_to_guest(buf, (uint32_t)len);
     return (slirp_ssize_t)len;
 }
 
@@ -175,7 +183,10 @@ static void notify(void *opaque) {
 
 /* The worker drains to_host until empty. Its first frame wakes poll(). */
 static void enqueue_to_host(const uint8_t *frame, uint32_t len) {
-    if (push(&to_host, frame, len) == PUSH_FIRST) notify(NULL);
+    pthread_mutex_lock(&to_host.mu);
+    enum PushResult result = push_locked(&to_host, frame, len);
+    pthread_mutex_unlock(&to_host.mu);
+    if (result == PUSH_FIRST) notify(NULL);
 }
 
 static int add_poll(slirp_os_socket fd, int events, void *opaque) {
@@ -259,7 +270,7 @@ static void *net_thread(void *unused) {
 static void dns_send(const uint8_t *frame, uint32_t len, int guest) {
     if (guest) {
         log_frame("rx dns", frame, len);
-        if (push(&to_guest, frame, len)) hv_machine_wake(machine);
+        enqueue_to_guest(frame, len);
     } else enqueue_to_host(frame, len);
 }
 
@@ -281,6 +292,8 @@ void hv_net_poll(void) {
         uint32_t lens[BATCH];
         int n = 0;
         pthread_mutex_lock(&to_guest.mu);
+        /* Rearm even if the guest is out of buffers. The next arrival can wake it again. */
+        rx_wake_pending = 0;
         uint32_t h = to_guest.head, t = to_guest.tail;
         while (h != t && n < BATCH) {
             Frame f = to_guest.f[h % QUEUE];
@@ -309,6 +322,7 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
     atomic_store(&stopping, 0);
     hv_dns_proxy_start();
     hv_net_tx_frames = hv_net_rx_frames = 0;
+    rx_wake_pending = 0;
     pthread_mutex_init(&to_guest.mu, NULL);
     pthread_mutex_init(&to_host.mu, NULL);
     queues_initialized = 1;
