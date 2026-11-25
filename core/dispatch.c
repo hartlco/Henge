@@ -159,14 +159,20 @@ void hv_evict_blocks(HvMachine *m) {
     m->seg_slots_len[seg] = 0;
     uint32_t unchained = 0, slot_only = 0;
     for (uint32_t k = m->tseg_head[seg]; k;) {
-        size_t before = nwords;
         uint32_t idx = k - 1u;
+        int patched = m->slot_tseg[idx] & HV_SLOT_PATCHED;
         k = m->slot_tnext[idx];
         m->slot_tnext[idx] = 0;
         m->slot_tprev[idx] = 0;
         m->slot_tseg[idx] = 0;
         m->slots[idx] = 0;
         if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
+        unchained++;
+        if (!patched) {
+            slot_only++;
+            continue;
+        }
+        size_t before = nwords;
         uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
         uint32_t *stub = hv_slot_dec(m, m->slot_stub[idx]);
         if (site && stub) {
@@ -191,7 +197,6 @@ void hv_evict_blocks(HvMachine *m) {
                 }
             }
         }
-        unchained++;
         slot_only += nwords == before;
     }
     m->stats.evict_unchained += unchained;
@@ -990,7 +995,7 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
         return;
     }
     uint32_t tseg = hv_jit_seg_of(m, b->code);
-    hv_slot_tlist_insert(m, tseg, idx);
+    int patched = 0;
     if (xa) {
         m->slot_xpa[idx] = page_pa | 1;
         hv_slot_xlist_insert(m, b->ram, b->pg, idx); /* on the target page's list (hv_invalidate_code) */
@@ -1002,6 +1007,7 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
     if (site && off >= -(1 << 25) && off < (1 << 25)) {
         uint32_t insn = 0x14000000u | (uint32_t)(off & 0x3ffffff);
         hv_jit_write(&m->jit, site, &insn, 4);
+        patched = 1;
         hv_jit_finish_branch(&m->jit, site); /* B to B; the stub follows the slot meanwhile */
     }
     uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
@@ -1010,8 +1016,10 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
         if (hv_branch_retarget(&insn, b->code - cond)) {
             hv_jit_write(&m->jit, cond, &insn, 4);
             hv_jit_finish(&m->jit, cond, 1);
+            patched = 1;
         }
     }
+    hv_slot_tlist_insert(m, tseg, idx, patched);
     m->stats.chained++;
     if (xa && m->stats_interval) m->stats.xchained++;
     pthread_mutex_unlock(&m->tr_mu);

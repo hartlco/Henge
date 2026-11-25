@@ -47,7 +47,7 @@ static int test_eviction_branch_range(void) {
         m.slot_site[i] = hv_slot_enc(&m, site);
         m.slot_stub[i] = hv_slot_enc(&m, site + 4);
         m.slot_cond[i] = hv_slot_enc(&m, hot);
-        hv_slot_tlist_insert(&m, 0, i);
+        hv_slot_tlist_insert(&m, 0, i, cases[i].direct_site || cases[i].direct_hot);
         uint32_t branch = 0x14000004, hot_branch = cases[i].hot_op;
         if (cases[i].direct_site) bad |= !hv_branch_retarget(&branch, cases[i].target - cases[i].site);
         int to = cases[i].direct_hot ? cases[i].target : cases[i].site;

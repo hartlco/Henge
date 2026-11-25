@@ -272,7 +272,7 @@ typedef struct HvMachine {
        through slot_xnext/slot_xprev (slot + 1, 0 at the ends) for O(1) removal on eviction. */
     uint64_t *slot_xa, *slot_xpa;
     uint32_t *slot_xnext, *slot_xprev, nxchained;
-    /* Incoming chain list per target JIT segment (slot_tseg = seg + 1 when chained, 0 otherwise)
+    /* Incoming chain list per target JIT segment (low bits: seg + 1 when chained, high bit: an instruction was patched)
        and per-source-segment owned slot lists, so evicting one segment is O(segment). */
     uint8_t *slot_tseg;
     uint32_t *slot_tprev, *slot_tnext;
@@ -360,17 +360,20 @@ static inline uint32_t *hv_slot_dec(const HvMachine *m, uint32_t enc) {
     return enc ? m->jit.base + (enc - 1u) : NULL;
 }
 
-static inline void hv_slot_tlist_insert(HvMachine *m, uint32_t tseg, uint32_t idx) {
+enum { HV_SLOT_PATCHED = 0x80 };
+_Static_assert(HV_JIT_MAX_SEGS < HV_SLOT_PATCHED, "target segment must fit with the patch flag");
+
+static inline void hv_slot_tlist_insert(HvMachine *m, uint32_t tseg, uint32_t idx, int patched) {
     uint32_t old_head = m->tseg_head[tseg];
     m->slot_tnext[idx] = old_head;
     m->slot_tprev[idx] = 0;
     if (old_head) m->slot_tprev[old_head - 1] = idx + 1u;
     m->tseg_head[tseg] = idx + 1u;
-    m->slot_tseg[idx] = (uint8_t)(tseg + 1u);
+    m->slot_tseg[idx] = (uint8_t)((tseg + 1u) | (patched ? HV_SLOT_PATCHED : 0));
 }
 
 static inline void hv_slot_tlist_unlink(HvMachine *m, uint32_t idx) {
-    uint8_t ts = m->slot_tseg[idx];
+    uint8_t ts = m->slot_tseg[idx] & ~HV_SLOT_PATCHED;
     if (!ts) return;
     uint32_t tseg = (uint32_t)(ts - 1u);
     uint32_t prev = m->slot_tprev[idx], next = m->slot_tnext[idx];

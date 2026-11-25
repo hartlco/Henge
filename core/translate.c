@@ -87,7 +87,7 @@ typedef struct {
     uint32_t nfix;
     Ool ool[MAX_OOL];
     uint32_t nool;
-    struct { uint32_t slot, at, flags, stub, cond_at; uint64_t target; uint8_t cold, stub_cold, has_cond; } site[MAX_OOL]; /* chainable exits: their slot, the B chaining patches, its stub, where to; the hot part's conditional branch to it if chaining may patch that too */
+    struct { uint32_t slot, at, flags, stub, cond_at; uint64_t target; uint8_t cold, stub_cold, has_cond, patched; } site[MAX_OOL]; /* chainable exits: their slot, the B chaining patches, its stub, where to; the hot part's conditional branch to it if chaining may patch that too */
     int site_direct;    /* the exit just written needs nothing done before its B: no check, no restores */
     uint32_t nsite;
     uint32_t place_seg;
@@ -466,6 +466,7 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
         e->site[e->nsite].cold = (uint8_t)(p0 && !e->flat);
         e->site[e->nsite].stub = e->n;
         e->site[e->nsite].has_cond = 0;
+        e->site[e->nsite].patched = 0;
         e->site[e->nsite++].stub_cold = (uint8_t)(e->in_cold && !e->flat);
         e->site_direct = !check && !xa;
     }
@@ -2298,8 +2299,12 @@ int hv_translate_place(HvMachine *m, HvBlock *b) {
         m->slots[slot] = (uint64_t)(uintptr_t)code;
         uint32_t at = e->site[k].at;
         int64_t off = code - ((e->site[k].cold ? cold : dst) + at);
-        if (off >= -(1 << 25) && off < (1 << 25)) (e->site[k].cold ? e->cold : e->hot)[at] = 0x14000000u | (uint32_t)(off & 0x3ffffff);
-        if (e->site[k].has_cond) hv_branch_retarget(&e->hot[e->site[k].cond_at], code - (dst + e->site[k].cond_at));
+        if (off >= -(1 << 25) && off < (1 << 25)) {
+            (e->site[k].cold ? e->cold : e->hot)[at] = 0x14000000u | (uint32_t)(off & 0x3ffffff);
+            e->site[k].patched = 1;
+        }
+        if (e->site[k].has_cond && hv_branch_retarget(&e->hot[e->site[k].cond_at], code - (dst + e->site[k].cond_at)))
+            e->site[k].patched = 1;
         if (m->stats_interval) m->stats.chained_early++;
     }
     if (e->flat) {
@@ -2355,7 +2360,7 @@ int hv_translate_commit_slots(HvMachine *m) {
         m->seg_slots[seg][m->seg_slots_len[seg]++] = idx;
         if (m->slots[idx]) {
             uint32_t tseg = hv_jit_seg_of(m, (const uint32_t *)(uintptr_t)m->slots[idx]);
-            hv_slot_tlist_insert(m, tseg, idx);
+            hv_slot_tlist_insert(m, tseg, idx, e->site[k].patched);
         }
     }
     e->nsite = 0;

@@ -13,6 +13,7 @@
 #include "share.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -67,18 +68,24 @@ void hv_net_set_share_socket(const char *path) {
     snprintf(share_socket, sizeof share_socket, "%s", path ? path : "");
 }
 
-static int push(Queue *q, const uint8_t *data, uint32_t len) {
+enum PushResult { PUSH_DROPPED, PUSH_APPENDED, PUSH_FIRST };
+
+static enum PushResult push(Queue *q, const uint8_t *data, uint32_t len) {
     pthread_mutex_lock(&q->mu);
-    int ok = q->tail - q->head < QUEUE;
-    if (ok) {
+    uint32_t depth = q->tail - q->head;
+    enum PushResult result = PUSH_DROPPED;
+    if (depth < QUEUE) {
         Frame *f = &q->f[q->tail % QUEUE];
         f->data = malloc(len);
-        memcpy(f->data, data, len);
-        f->len = len;
-        q->tail++;
+        if (f->data) {
+            memcpy(f->data, data, len);
+            f->len = len;
+            q->tail++;
+            result = depth ? PUSH_APPENDED : PUSH_FIRST;
+        }
     }
     pthread_mutex_unlock(&q->mu);
-    return ok;
+    return result;
 }
 
 /* HV_NET_LOG: one line per frame (ethertype, IP protocol, ports). */
@@ -163,7 +170,12 @@ static void unregister_poll_socket(slirp_os_socket fd, void *opaque) {
 static void notify(void *opaque) {
     (void)opaque;
     char c = 0;
-    (void)!write(wake_pipe[1], &c, 1);
+    while (write(wake_pipe[1], &c, 1) < 0 && errno == EINTR) {}
+}
+
+/* The worker drains to_host until empty. Its first frame wakes poll(). */
+static void enqueue_to_host(const uint8_t *frame, uint32_t len) {
+    if (push(&to_host, frame, len) == PUSH_FIRST) notify(NULL);
 }
 
 static int add_poll(slirp_os_socket fd, int events, void *opaque) {
@@ -248,10 +260,7 @@ static void dns_send(const uint8_t *frame, uint32_t len, int guest) {
     if (guest) {
         log_frame("rx dns", frame, len);
         if (push(&to_guest, frame, len)) hv_machine_wake(machine);
-    } else if (push(&to_host, frame, len)) {
-        char c = 0;
-        (void)!write(wake_pipe[1], &c, 1);
-    }
+    } else enqueue_to_host(frame, len);
 }
 
 /* CPU thread: the guest sent a frame. */
@@ -260,10 +269,7 @@ static void transmit(void *opaque, const uint8_t *frame, uint32_t len) {
     hv_net_tx_frames++;
     log_frame("tx", frame, len);
     if (hv_dns_proxy_take(frame, len, dns_send)) return;
-    if (push(&to_host, frame, len)) {
-        char c = 0;
-        (void)!write(wake_pipe[1], &c, 1);
-    }
+    enqueue_to_host(frame, len);
 }
 
 void hv_net_poll(void) {
