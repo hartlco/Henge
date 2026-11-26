@@ -69,6 +69,42 @@ static int test_eviction_branch_range(void) {
     return bad;
 }
 
+/* Enter the fallback stubs directly so a short host branch cannot skip them. */
+static int test_chain_stubs(HvMachine *m, uint64_t sp) {
+    uint32_t ids[2], n = 0;
+    for (uint32_t i = 0; i < m->nslots && n < 2; i++)
+        if (m->slot_stub[i]) ids[n++] = i;
+    if (n != 2) return 1;
+
+    static HvCpu cpu;
+    hv_cpu_reset(&cpu, m);
+    seed_cpu(&cpu, 27, sp);
+    uint64_t lr = cpu.x[30], old[2], target[2];
+    uint32_t *stub[2];
+    int bad = 0;
+    for (int i = 0; i < 2; i++) {
+        old[i] = m->slots[ids[i]];
+        m->slots[ids[i]] = 0;
+        stub[i] = hv_slot_dec(m, m->slot_stub[ids[i]]);
+        cpu.exit_req = 0;
+        cpu.last_stub = 0;
+        hv_enter(&cpu, stub[i]);
+        target[i] = cpu.pc;
+        bad |= cpu.x[30] != lr || cpu.last_stub != (uintptr_t)&m->slots[ids[i]];
+    }
+    m->slots[ids[0]] = (uintptr_t)stub[1];
+    for (int requested = 0; requested <= 1; requested++) {
+        cpu.exit_req = requested;
+        cpu.last_stub = 0;
+        hv_enter(&cpu, stub[0]);
+        bad |= cpu.x[30] != lr || cpu.pc != target[requested ? 0 : 1] ||
+               cpu.last_stub != (requested ? 0 : (uintptr_t)&m->slots[ids[1]]);
+    }
+    for (int i = 0; i < 2; i++) m->slots[ids[i]] = old[i];
+    printf("linked, empty and interrupted branch stubs: %s\n", bad ? "FAIL" : "ok");
+    return bad;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static HvMachine m;
@@ -102,6 +138,7 @@ int main(void) {
             failed += bad != 0;
         }
     }
+    failed += test_chain_stubs(&m, sp);
     /* PAC: compare against the inputs, with canonical pointers in the registers. */
     {
         static HvCpu init, jit;
