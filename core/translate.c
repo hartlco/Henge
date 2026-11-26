@@ -56,11 +56,11 @@ typedef struct {
 } Ool;
 
 /* Loads and stores on one base register, close together in a block: the first
-   checks the TLB once for the whole range they touch and computes the host address of
-   its first byte. Consecutive members keep it in a scratch register. Other
-   groups save it in cpu->group_base[slot] across intervening instructions. If that check fails, the block runs a plain translation of the
-   instructions from the first through `end` instead (copy_at) and comes back
-   after them. See plan_groups. */
+   checks the TLB for their whole range. Consecutive accesses can keep the
+   checked host address in x6. Other groups keep the page's host addend in
+   cpu->gaddend[slot] across intervening instructions. If the check fails,
+   the block runs a plain translation from the first instruction through `end`
+   (copy_at) and comes back after them. See plan_groups. */
 #define MAX_GROUPS 8
 #define GROUP_SLOTS 4
 #define GROUP_SPAN 4096   /* bytes one group may cover */
@@ -108,7 +108,7 @@ typedef struct {
     uint32_t after[HV_MAX_BLOCK_INSNS]; /* where each instruction's translation ends */
     uint32_t cur_i;
     int nogroup;                        /* translating plain (copies, or the retry when they do not fit) */
-    int base_live, base_prev;           /* slot + 1 when x6 still holds the checked host address */
+    int u_live, u_prev;                 /* slot + 1 when x15 holds that group's addend after the last instruction */
     int overflow;
 } Emit;
 
@@ -1023,7 +1023,7 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
         grp = &e->grp[e->gid[e->cur_i]];
     }
     int g_el = op.unpriv || !(e->flags & HV_BLOCK_EL1) ? 0 : (e->flags & HV_BLOCK_PAN) ? 2 : 1;
-    /* With the normal scratch allocation every member uses x6 for A. */
+    /* In the normal allocation x6 is free scratch for every group member. */
     int consecutive = grp && grp->consecutive && !hv_knob[HV_K_TEST3];
     if (role == 1) {
         /* The whole range: A = base + lo, then the usual check for hi - lo bytes. */
@@ -1045,13 +1045,16 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, CBNZ_X(U));
         put_ool(e, (Ool){.kind = OOL_GROUP, .pc = (uint64_t)(grp - e->grp), .nrestore = 3, .restore = {A, T, U}});
         put(e, LDR_X(U, T, gtlb + 24));
-        put(e, ADD_LSL(A, ch, U, 0));
-        if (!consecutive) put(e, STR_X(A, 28, HV_CPU_GROUP_BASE + 8 * grp->slot));
-    } else if (role == 2 && !consecutive && !(A == 6 && e->base_prev == grp->slot + 1)) {
-        put(e, LDR_X(A, 28, HV_CPU_GROUP_BASE + 8 * grp->slot));
+        if (!consecutive) put(e, STR_X(U, 28, HV_CPU_GADDEND + 8 * grp->slot));
+        put(e, ADD_LSL(A, ch, U, 0)); /* host address of base + lo */
+    } else if (role == 2 && !consecutive) {
+        if (!(e->u_prev == grp->slot + 1 && U == 15)) put(e, LDR_X(U, 28, HV_CPU_GADDEND + 8 * grp->slot));
+        put(e, op.rn == 31 ? ADD_EXT(A, 31, U, 3, 0) : ADD_LSL(A, op.rn, U, 0)); /* host address of the base */
     }
-    /* goff includes the writebacks of preceding members. */
-    int64_t gimm = role ? e->goff[e->cur_i] - grp->lo : 0;
+    /* Grouped: A + gimm is the host address (the access encodes gimm when it can). */
+    int64_t gimm = 0;
+    if (consecutive) gimm = e->goff[e->cur_i] - grp->lo; /* includes earlier base writebacks */
+    else if (role) gimm = (op.mode == HV_ADDR_POST ? 0 : op.imm) - (role == 1 ? grp->lo : 0);
 
     /* Effective address into A, or used where it is: a guest base register with nothing added. */
     int sp_base = !literal && op.rn == 31; /* the guest SP, which is the host SP while blocks run */
@@ -1125,14 +1128,14 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     /* Single loads and stores take [addr, addend] directly; the rest want the host address in A. */
     int reg_offset = op.kind == HV_MEM_SINGLE || op.kind == HV_MEM_LITERAL || op.kind == HV_MEM_LDRA;
     if (!reg_offset && !role) put(e, ADD_LSL(A, addr, U, 0));
-    int64_t adjustment = 0;
+    int64_t temporary_offset = 0;
     if (role) {
         int64_t scale = 1ll << op.size;
         int fits = pair ? gimm % scale == 0 && gimm / scale >= -64 && gimm / scale < 64
                         : (gimm >= 0 && gimm % scale == 0 && gimm / scale < 4096) || (gimm >= -256 && gimm < 256);
         if (!fits) {
-            adjustment = gimm;
-            put_add_imm(e, A, A, adjustment);
+            if (consecutive && e->cur_i < grp->last) temporary_offset = gimm;
+            put_add_imm(e, A, A, gimm);
             gimm = 0;
         }
     }
@@ -1202,8 +1205,8 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
         if (rt2_stolen) put(e, STR_X(rt2, 28, slot_of(op.rt2)));
     }
 
-    /* A pair or an unaligned offset can need a separate address calculation. */
-    if (consecutive && adjustment && e->cur_i < grp->last) put_add_imm(e, A, A, -adjustment);
+    /* Keep x6 at the group's low address if the offset needed its own ADD. */
+    if (temporary_offset) put_add_imm(e, A, A, -temporary_offset);
 
     /* Base writeback. */
     if (op.mode == HV_ADDR_PRE || op.mode == HV_ADDR_POST) {
@@ -1226,9 +1229,8 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     }
     unspill(e, s, 3);
     if (slow != ~0u) e->ool[slow].join = e->n;
-    /* A plain copy rejoins after the last member of a group. Only carry x6
-       into the next instruction when this same group still has work. */
-    if (role && A == 6 && !adjustment && e->cur_i < grp->last) e->base_live = grp->slot + 1;
+    /* Stand-ins for x18/x28 and writeback may have used U. */
+    if (role && !consecutive && U == 15 && !rt2_stolen && !(rt_stolen && rt == U) && op.mode == HV_ADDR_OFFSET) e->u_live = grp->slot + 1;
 }
 
 /* DC ZVA: zero the 64-byte block holding Xt, on the host's own copy when the
@@ -2071,7 +2073,7 @@ static void plan_groups(Emit *e, const uint32_t *code, uint32_t max, uint64_t va
                 int64_t lo = off < g->lo ? off : g->lo, hi = off + op.bytes > g->hi ? off + op.bytes : g->hi;
                 if (hi - lo > GROUP_SPAN || i - g->first > GROUP_INSNS) g = NULL;
                 else {
-                    g->consecutive &= i == (uint32_t)g->last + 1;
+                    g->consecutive &= i == g->last + 1u;
                     g->lo = (int32_t)lo, g->hi = (int32_t)hi, g->last = (uint16_t)i, g->store |= op.store;
                     e->gid[i] = (int8_t)cur[b], e->grole[i] = 2, e->goff[i] = (int32_t)off;
                 }
@@ -2143,7 +2145,7 @@ static int emit_group_copies(Emit *e, const uint32_t *code, uint64_t va, uint32_
             if (e->n + WORDS_PER_INSN_MAX * 2 > MAX_WORDS || e->npool + 8 > MAX_LITS || e->nool + 4 > MAX_OOL) return -1;
             e->cur_pc = va + 4ull * i;
             e->cur_i = i;
-            e->base_prev = e->base_live = 0;
+            e->u_prev = e->u_live = 0;
             if (translate_one(e, code[i], va + 4ull * i)) return -1; /* cannot happen: groups hold no block ends */
         }
         put(e, B_OP);
@@ -2179,7 +2181,7 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
     e->no_ijc = !m->chain;
     e->m = m;
     e->nogroup = nogroup;
-    e->base_live = e->base_prev = 0;
+    e->u_live = e->u_prev = 0;
 
     /* No prologue: hv_enter, chained exits and the indirect-branch cache all
        enter with guest x0 and x1 live. */
@@ -2192,7 +2194,7 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
         if (i > 0 && (pc == m->stop_pc || pc == m->stop_pc2)) break; /* so the dispatcher sees stop_pc at a block start */
         e->cur_pc = pc;
         e->cur_i = i;
-        e->base_prev = e->base_live, e->base_live = 0;
+        e->u_prev = e->u_live, e->u_live = 0;
         uint32_t n0 = e->n;
         ended = translate_one(e, code[i], pc);
         if (m->stats_interval) {

@@ -89,7 +89,7 @@ typedef struct HvCpu {
     uint64_t ijc_thunk;      /* 0x430: hv_ijc_thunk */
     uint64_t refill_ret;     /* 0x438: where it goes back to */
     uint64_t ijc_tab[16];    /* 0x440: each flags value's branch-cache table (ijc + flags * table size) */
-    uint64_t group_base[4];  /* 0x4c0: checked host addresses for overlapping groups of memory accesses */
+    uint64_t gaddend[4];     /* 0x4c0: host addends of the pages groups of accesses on one base register were checked in (translate_mem) */
     uint64_t xjump_thunk;    /* 0x4e0: hv_xjump_thunk */
     uint64_t tcr_el1;        /* 0x4e8: here, in reach of one load, for translated MRS (xnu reads it ~17K times a second at login) */
     uint64_t par_el1;        /* 0x4f0: likewise, read after each AT */
@@ -219,7 +219,7 @@ typedef struct HvCpu {
 #define HV_CPU_IJC_TAB     0x440
 #define HV_CPU_TLB         0x580
 #define HV_CPU_RET_SALT    0x500
-#define HV_CPU_GROUP_BASE  0x4c0
+#define HV_CPU_GADDEND     0x4c0
 #define HV_CPU_XJUMP_THUNK 0x4e0
 #define HV_CPU_TCR_EL1     0x4e8
 #define HV_CPU_PAR_EL1     0x4f0
@@ -273,7 +273,7 @@ _Static_assert(offsetof(HvCpu, mpidr) == HV_CPU_MPIDR, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, cntv_cval) == HV_CPU_CNTV_CVAL, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, par_el1) == HV_CPU_PAR_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, ret_tab) == HV_CPU_RET_TAB, "HvCpu layout");
-_Static_assert(offsetof(HvCpu, group_base) == HV_CPU_GROUP_BASE, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, gaddend) == HV_CPU_GADDEND, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, xjump_thunk) == HV_CPU_XJUMP_THUNK, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, tpidr_el0) == HV_CPU_TPIDR_EL0, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, daif) == HV_CPU_DAIF, "HvCpu layout");
