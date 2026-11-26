@@ -680,7 +680,8 @@ struct SessionView: View {
                 let cpuMilliseconds = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) / 1_000_000
                 HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
                              + "network tx \(framesOut), rx \(framesIn), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
-                             + "thermal \(Self.thermalLabel(heat)), network bytes tx \(sentBytes), rx \(receivedBytes), process CPU ms \(cpuMilliseconds)")
+                             + "thermal \(Self.thermalLabel(heat)), network bytes tx \(sentBytes), rx \(receivedBytes), process CPU ms \(cpuMilliseconds), "
+                             + HengeLog.processPowerCounters())
                 lastGPUFrames = gpuFrames
                 JITBootstrap.releaseLingeringDebugger()
             }

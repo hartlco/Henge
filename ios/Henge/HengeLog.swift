@@ -385,6 +385,26 @@ enum HengeLog {
         return false
     }
 
+    /// Cumulative counters for this process so consecutive samples can be compared with bytes transferred.
+    static func processPowerCounters() -> String {
+        var info = task_power_info_v2_data_t()
+        let capacity = MemoryLayout.size(ofValue: info) / MemoryLayout<integer_t>.stride
+        var count = mach_msg_type_number_t(capacity)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: capacity) {
+                task_info(mach_task_self_, task_flavor_t(TASK_POWER_INFO_V2), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS, count == capacity else { return "process power unavailable" }
+        var fields = "process interrupt wakeups \(info.cpu_energy.task_interrupt_wakeups), platform idle wakeups \(info.cpu_energy.task_platform_idle_wakeups)"
+        #if arch(arm64)
+        if info.task_energy > 0 {
+            fields += ", estimated process CPU energy mJ \(info.task_energy / 1_000_000)"
+        }
+        #endif
+        return fields
+    }
+
     /// Snapshot of process memory, the figure jetsam kills on.
     static func logFootprint(_ tag: String) {
         henge_ios_jit_log_footprint(tag)
