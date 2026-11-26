@@ -373,7 +373,12 @@ void hv_net_detach(void) {
         pthread_join(network_thread, NULL);
         thread_started = 0;
     }
-    if (net) net->transmit = NULL;
+    if (net) {
+        net->transmit = NULL;
+        if (machine->stats_interval && net->rx_frames)
+            fprintf(stderr, "hengevm: network delivered %llu Ethernet frames in %llu guest receive buffers\n",
+                    (unsigned long long)net->rx_frames, (unsigned long long)net->rx_buffers);
+    }
     if (slirp) slirp_cleanup(slirp);
     slirp = NULL;
     if (queues_initialized) {

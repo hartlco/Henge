@@ -92,6 +92,11 @@ static uint32_t rd32(uint64_t pa) {
     hv_phys_read(&m, pa, &v, 4);
     return v;
 }
+static uint16_t rd16(uint64_t pa) {
+    uint16_t v = 0;
+    hv_phys_read(&m, pa, &v, sizeof v);
+    return v;
+}
 static uint8_t rd8(uint64_t pa) {
     uint8_t v = 0;
     hv_phys_read(&m, pa, &v, 1);
@@ -291,7 +296,7 @@ static uint64_t find_slot(uint16_t vendor, uint16_t device, int nth) {
     return ~0ull;
 }
 
-static uint64_t setup_virtio(int slot, uint64_t bar, uint64_t ring) {
+static uint64_t setup_virtio_features(int slot, uint64_t bar, uint64_t ring, uint32_t low) {
     uint64_t cfg = VMAPPLE_PCIE_ECAM + ((uint64_t)slot << 15);
     wr32(cfg + 0x20, 0xffffffff);
     check("BAR4 size 16 KB, 64-bit", rd32(cfg + 0x20), 0xffffc004);
@@ -310,6 +315,8 @@ static uint64_t setup_virtio(int slot, uint64_t bar, uint64_t ring) {
     wr8(bar + 0x14, 1 | 2); /* ACKNOWLEDGE, DRIVER */
     wr32(bar + 0x00, 1);
     check("VERSION_1 offered", rd32(bar + 0x04) & 1, 1);
+    wr32(bar + 0x08, 0);
+    wr32(bar + 0x0c, low);
     wr32(bar + 0x08, 1);
     wr32(bar + 0x0c, 1);
     wr8(bar + 0x14, 1 | 2 | 8);
@@ -326,6 +333,10 @@ static uint64_t setup_virtio(int slot, uint64_t bar, uint64_t ring) {
     }
     wr8(bar + 0x14, 1 | 2 | 8 | 4);
     return ring;
+}
+
+static uint64_t setup_virtio(int slot, uint64_t bar, uint64_t ring) {
+    return setup_virtio_features(slot, bar, ring, 0);
 }
 
 static void put_desc(uint64_t table, int i, uint64_t addr, uint32_t len, uint16_t flags, uint16_t next) {
@@ -530,6 +541,63 @@ static void capture_tx(void *opaque, const uint8_t *frame, uint32_t len) {
     sent_len = len;
 }
 
+/* Two in-order TCP segments with known IP and TCP checksums. The second ends a push. */
+static void test_tcp_receive_offload(int slot, uint64_t bar, uint64_t ring, uint64_t buf) {
+    static const uint8_t first[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+        0x08, 0x00, 0x45, 0x00, 0x00, 0x38, 0x00, 0x0a, 0x40, 0x00, 0x40, 0x06,
+        0x22, 0xa6, 0x0a, 0x00, 0x02, 0x02, 0x0a, 0x00, 0x02, 0x0f, 0x04, 0x01,
+        0x08, 0xae, 0x00, 0x00, 0x0b, 0xb8, 0x00, 0x00, 0x1f, 0x40, 0x50, 0x10,
+        0x04, 0x00, 0x18, 0xc2, 0x00, 0x00, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+        0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70
+    };
+    uint8_t second[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+        0x08, 0x00, 0x45, 0x00, 0x00, 0x34, 0x00, 0x0b, 0x40, 0x00, 0x40, 0x06,
+        0x22, 0xa9, 0x0a, 0x00, 0x02, 0x02, 0x0a, 0x00, 0x02, 0x0f, 0x04, 0x01,
+        0x08, 0xae, 0x00, 0x00, 0x0b, 0xc8, 0x00, 0x00, 0x1f, 0x40, 0x50, 0x18,
+        0x04, 0x00, 0xef, 0x87, 0x00, 0x00, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76,
+        0x77, 0x78, 0x79, 0x7a, 0x21, 0x21
+    };
+    const uint8_t *frames[] = {first, second};
+    const uint32_t lens[] = {sizeof first, sizeof second};
+    setup_virtio_features(slot, bar, ring, (1u << 1) | (1u << 7));
+    check("driver negotiated receive offload", (board.net->vio.driver_features & 0x82) == 0x82, 1);
+
+    /* One descriptor holds the virtio header and another holds the Ethernet frame. */
+    put_desc(ring, 0, buf, 12, 3, 1);
+    put_desc(ring, 1, buf + 0x1000, 512, 2, 0);
+    offer(ring, 0);
+    uint64_t prior = board.net->rx_bytes;
+    uint64_t buffers = board.net->rx_buffers;
+    check("two segments received", hv_virtio_net_receive_batch(board.net, frames, lens, 2), 2);
+    check("one receive buffer used", used_idx(ring), 1);
+    check("one completed receive chain", board.net->rx_buffers - buffers, 1);
+    check("partial checksum and TCPv4", rd16(buf), 0x0101);
+    check("receive header length", rd16(buf + 2), 54);
+    check("first TCP payload size", rd16(buf + 4), 16);
+    check("checksum start", rd16(buf + 6), 34);
+    check("checksum offset", rd16(buf + 8), 16);
+    check("one buffer chain", rd16(buf + 10), 1);
+    const uint8_t *f = ram(buf + 0x1000);
+    check("joined IPv4 length", f[16] * 256 + f[17], 68);
+    check("last packet push retained", f[47], 0x18);
+    check("combined TCP checksum seed", f[50] * 256 + f[51], 0x1847);
+    check("combined payload", memcmp(f + 54, "abcdefghijklmnopqrstuvwxyz!!", 28), 0);
+    check("original Ethernet byte count", board.net->rx_bytes - prior, sizeof first + sizeof second);
+
+    put_desc(ring, 2, buf, 12 + sizeof first, 2, 0);
+    offer(ring, 2);
+    check("small receive buffer takes one packet", hv_virtio_net_receive_batch(board.net, frames, lens, 2), 1);
+    check("small buffer gets ordinary header", rd16(buf), 0);
+
+    second[sizeof second - 1] ^= 1;
+    put_desc(ring, 3, buf, 512, 2, 0);
+    offer(ring, 3);
+    check("bad checksum ends a group", hv_virtio_net_receive_batch(board.net, frames, lens, 2), 1);
+    check("ordinary packet still intact", memcmp(ram(buf + 12), first, sizeof first), 0);
+}
+
 static void test_virtio_net(void) {
     int slot = (int)find_slot(0x1af4, 0x1041, 0);
     check("virtio-net enumerated", slot >= 0 && slot < 32, 1);
@@ -573,6 +641,7 @@ static void test_virtio_net(void) {
     memcpy(&used_len, ram(rxq + 0x2000 + 8), 4);
     check("RX used length", used_len, 76);
     check("RX byte count", board.net->rx_bytes, 64);
+    test_tcp_receive_offload(slot, bar, ring, buf);
 }
 
 /* The memory balloon: a new target reaches the driver (config change interrupt), inflated 16 KB pages go back

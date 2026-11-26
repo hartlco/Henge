@@ -12,6 +12,8 @@ typedef struct HvVirtioNet {
     void *opaque;
     uint64_t tx_frames, rx_frames, rx_dropped;
     uint64_t tx_bytes, rx_bytes; /* Ethernet frames, excluding the virtio header */
+    uint64_t rx_buffers;         /* completed receive chains carrying Ethernet data */
+    uint8_t rx_group[14 + 65535]; /* scratch for one negotiated IPv4 receive offload */
 } HvVirtioNet;
 
 HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6]);
