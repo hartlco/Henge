@@ -2560,19 +2560,19 @@ typedef struct {
 
 /* Every possible half-float value to a display byte, as the screen would show it in the current mode (see hv_half_mode). */
 static const uint8_t *half_to_byte(void) {
-    static uint8_t *tables[2];
+    static uint8_t tables[2][65536];
+    static dispatch_once_t once[2];
     int mode = hv_half_mode_get();
-    if (tables[mode]) return tables[mode];
-    uint8_t *t = malloc(65536);
-    for (uint32_t i = 0; i < 65536; i++) {
-        uint16_t bits = (uint16_t)i;
-        __fp16 h;
-        memcpy(&h, &bits, 2);
-        float v = h;
-        t[i] = !(v > 0) ? 0 : v >= 1 ? 255 : (uint8_t)(hv_half_shown(v, mode) * 255.0f + 0.5f);
-    }
-    tables[mode] = t;
-    return t;
+    dispatch_once(&once[mode], ^{
+        for (uint32_t i = 0; i < 65536; i++) {
+            uint16_t bits = (uint16_t)i;
+            __fp16 h;
+            memcpy(&h, &bits, 2);
+            float v = h;
+            tables[mode][i] = !(v > 0) ? 0 : v >= 1 ? 255 : (uint8_t)(hv_half_shown(v, mode) * 255.0f + 0.5f);
+        }
+    });
+    return tables[mode];
 }
 
 static id cursor_image_from_bgra(const uint8_t *bits, size_t w, size_t h, size_t stride) {
@@ -3380,22 +3380,24 @@ int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) 
     const uint8_t *base = (const uint8_t *)buffer.contents + tex.bufferOffset;
     size_t row = tex.bufferBytesPerRow;
     /* Four samples to a pixel: one makes text look broken at this size. */
+    const uint8_t *lut = half ? half_to_byte() : NULL;
     for (uint32_t y = 0; y < h; y++) {
         uint8_t *out = bgra + (size_t)y * w * 4;
+        uint64_t source_y = (uint64_t)y * H;
+        const uint8_t *rows[2] = {base + (source_y / h) * row, base + ((source_y + H / 2) / h) * row};
         for (uint32_t x = 0; x < w; x++, out += 4) {
             uint32_t sum[3] = {0, 0, 0};
+            uint64_t source_x = (uint64_t)x * W;
+            size_t cols[2] = {source_x / w, (source_x + W / 2) / w};
             for (uint32_t k = 0; k < 4; k++) {
-                size_t sx = (2 * x + (k & 1)) * (uint64_t)W / (2 * w), sy = (2 * y + (k >> 1)) * (uint64_t)H / (2 * h);
-                const uint8_t *src = base + sy * row;
+                size_t sx = cols[k & 1];
+                const uint8_t *src = rows[k >> 1];
                 if (!half) {
                     for (int c = 0; c < 3; c++) sum[c] += src[sx * 4 + c];
                     continue;
                 }
-                const __fp16 *p = (const __fp16 *)(src + sx * 8);
-                for (int c = 0; c < 3; c++) {
-                    float v = hv_half_shown((float)p[c], hv_half_mode_get()); /* as the screen shows it */
-                    sum[2 - c] += (uint32_t)(v * 255 + 0.5f);
-                }
+                const uint16_t *p = (const uint16_t *)(src + sx * 8);
+                for (int c = 0; c < 3; c++) sum[2 - c] += lut[p[c]];
             }
             for (int c = 0; c < 3; c++) out[c] = (uint8_t)((sum[c] + 2) / 4);
             out[3] = 255;
