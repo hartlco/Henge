@@ -456,6 +456,22 @@ static void test_virtio_blk(HvDisk *aux) {
         pos += parts[i];
     }
     check("scattered read inline status", ram(pages[2])[parts[2]], 0);
+
+    h[0] = 1;
+    h[2] = 12;
+    memcpy(ram(hdr), h, sizeof h);
+    for (int i = 0; i < 3; i++)
+        put_desc(ring, i + 1, pages[i], parts[i], 1, i + 2);
+    put_desc(ring, 4, status, 1, 2, 0);
+    ram(status)[0] = 0xff;
+    offer(ring, 0);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    check("scattered write status", ram(status)[0], 0);
+    check("scattered write used length", rd32(ring + 0x2000 + 8 + 5 * 8), 1);
+    uint8_t actual[1024];
+    check("read scattered write back", hv_disk_read(aux, 12 * 512, actual, sizeof actual), 0);
+    check("scattered write data", memcmp(actual, want, sizeof actual), 0);
     rd8(bar + 0x1000);
 }
 

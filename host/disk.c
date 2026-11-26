@@ -59,7 +59,8 @@ int hv_disk_read(HvDisk *d, uint64_t off, void *buf, uint64_t len) {
     return 0;
 }
 
-ssize_t hv_disk_readv(HvDisk *d, uint64_t off, const struct iovec *buffers, int count) {
+static ssize_t disk_vector(HvDisk *d, uint64_t off, const struct iovec *buffers, int count, int write) {
+    if (write && d->readonly) return -1;
     uint64_t bytes = 0;
     for (int i = 0; i < count; i++) {
         if (buffers[i].iov_len > DISK_IO_CHUNK - bytes) return 0;
@@ -68,10 +69,20 @@ ssize_t hv_disk_readv(HvDisk *d, uint64_t off, const struct iovec *buffers, int 
     if (!bytes || off > d->size || bytes > d->size - off) return 0;
     ssize_t n;
     do {
-        n = preadv(d->fd, buffers, count, (off_t)(d->offset + off));
+        off_t pos = (off_t)(d->offset + off);
+        n = write ? pwritev(d->wfd >= 0 ? d->wfd : d->fd, buffers, count, pos)
+                  : preadv(d->fd, buffers, count, pos);
     } while (n < 0 && errno == EINTR);
     if (n < 0 && (errno == ENOTSUP || errno == ENOSYS || errno == EINVAL)) return 0;
     return n > 0 ? n : -1;
+}
+
+ssize_t hv_disk_readv(HvDisk *d, uint64_t off, const struct iovec *buffers, int count) {
+    return disk_vector(d, off, buffers, count, 0);
+}
+
+ssize_t hv_disk_writev(HvDisk *d, uint64_t off, const struct iovec *buffers, int count) {
+    return disk_vector(d, off, buffers, count, 1);
 }
 
 int hv_disk_write(HvDisk *d, uint64_t off, const void *buf, uint64_t len) {

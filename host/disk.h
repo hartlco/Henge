@@ -18,9 +18,9 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly);
 void hv_disk_close(HvDisk *d);
 /* Return 0, or -1 on an I/O error or an access past the end. */
 int hv_disk_read(HvDisk *d, uint64_t off, void *buf, uint64_t len);
-/* Read into several buffers. Positive results count bytes read, zero asks
-   the caller to use scalar reads, and -1 reports an I/O error. */
+/* Vector operations return bytes transferred, zero for scalar fallback, or -1 on error. */
 ssize_t hv_disk_readv(HvDisk *d, uint64_t off, const struct iovec *buffers, int count);
+ssize_t hv_disk_writev(HvDisk *d, uint64_t off, const struct iovec *buffers, int count);
 int hv_disk_write(HvDisk *d, uint64_t off, const void *buf, uint64_t len);
 int hv_disk_flush(HvDisk *d);
 
