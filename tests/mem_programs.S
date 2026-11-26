@@ -353,6 +353,26 @@ PROGRAM groups
     ldp x16, x17, [x12, #-16]
     // Base overwritten by a load in the group.
     ldr x12, [x12, #-8]
+    // A byte before the base makes the distant pair's group displacement
+    // unencodable. The next accesses still use the original checked address.
+    add x12, x0, #0x800
+    mov x15, x12
+    strb w1, [x15]
+    sturb w1, [x12, #-1]
+    stp x2, x3, [x12, #504]
+    ldp x4, x5, [x12, #504]
+    ldrh w6, [x12, #3]!
+    str x28, [x12], #8
+    ldrb w10, [x12]
+
+    // An inner group crosses a page. Its plain copy rejoins before the
+    // outer group stores the loaded values on its own page.
+    add x12, x0, #0x800
+    add x13, x0, #0x4000
+    str x2, [x12, #32]
+    ldur x3, [x13, #-8]
+    ldr x4, [x13, #8]
+    stp x3, x4, [x12, #48]
 END groups
 
 PROGRAM mmio
