@@ -150,6 +150,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     NSMutableDictionary<NSString *, NSMutableData *> *planar_hashes; /* and what its planes held when last copied */
     NSMutableSet<NSString *> *complaints;
     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
+    uint64_t surfaces_mapped;
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
        GPU's completion handlers run in the order of commit. */
     _Atomic int inflight;
@@ -1237,22 +1238,14 @@ static void sync_iosurface(HvObject *s) {
    mapSurface:]): each 32-bit entry is a 16 KB page number << 2 with two flag bits,
    01 for a page and 11 for a table page. Up to 4096 pages the list page holds the
    surface's pages; past that it holds up to 4096 table pages of 4096 pages each. */
-/* Entry i of a surface's page table, or 0 for a missing or malformed one. */
-static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, uint64_t i) {
-    const uint64_t per = 0x4000 / 4;
-    if (!(list & 1) || n > per * per) return 0;
+enum { SURFACE_TABLE_ENTRIES = 0x4000 / sizeof(uint32_t) };
+static const uint32_t *surface_page_table(HvPvgLite *lite, uint32_t list, uint64_t n, uint64_t first_page) {
+    if (!(list & 1) || n > (uint64_t)SURFACE_TABLE_ENTRIES * SURFACE_TABLE_ENTRIES) return NULL;
     const uint32_t *root = hv_pvg_lite_phys(lite, (uint64_t)(list >> 2) << 14, 0x4000);
-    if (!root) return 0;
-    uint32_t e;
-    if (n <= per) e = root[i];
-    else {
-        uint32_t table = root[i / per];
-        if ((table & 3) != 3) return 0;
-        const uint32_t *t = hv_pvg_lite_phys(lite, (uint64_t)(table >> 2) << 14, 0x4000);
-        if (!t) return 0;
-        e = t[i % per];
-    }
-    return (e & 3) == 1 ? e : 0;
+    if (!root || n <= SURFACE_TABLE_ENTRIES) return root;
+    uint32_t table = root[first_page / SURFACE_TABLE_ENTRIES];
+    if ((table & 3) != 3) return NULL;
+    return hv_pvg_lite_phys(lite, (uint64_t)(table >> 2) << 14, 0x4000);
 }
 /* A guest surface (IOSurface) from its description: its pages in one host buffer, every plane's views on them. */
 - (HvObject *)newSurface:(uint64_t)mapping {
@@ -1266,7 +1259,8 @@ static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, u
        macOS 14's driver writes a compact one: u32 allocation at 0x10, width and height << 8 at 0x14 and 0x18, u32 row
        at 0x1c, bytes per pixel at 0x20 (BGRA 1920x1080: 007ec000 00078080 00043880 00001e00 00000004); one plane. */
     BOOL compact = hv_pvg_lite_old_driver(lite) != 0;
-    if (getenv("HV_PVG_DESC_DUMP")) {
+    BOOL dump = getenv("HV_PVG_DESC_DUMP") != NULL;
+    if (dump) {
         fprintf(stderr, "surface-desc %llu:", mapping);
         for (int i = 0; i < 0x200; i += 4) fprintf(stderr, "%s%08x", i % 32 ? " " : "\n  ", *(const uint32_t *)(desc + i));
         fprintf(stderr, "\n");
@@ -1294,20 +1288,28 @@ static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, u
     }
     surface->surface_w = (uint32_t)sw, surface->surface_h = (uint32_t)sh;
     uint64_t n = surface->length >> 14;
-    vm_address_t base = 0;
-    uint32_t page0 = n ? surface_page_entry(lite, list, n, 0) : 0;
-    if (!page0 || vm_allocate(mach_task_self(), &base, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
+    vm_address_t address = 0;
+    const uint32_t *table = n ? surface_page_table(lite, list, n, 0) : NULL;
+    uint32_t page0 = table ? table[0] : 0;
+    if ((page0 & 3) != 1 || vm_allocate(mach_task_self(), &address, surface->length, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
         [self complain:[NSString stringWithFormat:@"surface %llu has no pages", mapping]];
         return nil;
     }
-    surface->mapped = (uint8_t *)base;
+    surface->mapped = (uint8_t *)address;
     uint32_t pages[256];
-    for (uint64_t i = 0; i < n;) {
-        uint64_t count = MIN(n - i, sizeof pages / sizeof pages[0]);
-        for (uint64_t k = 0; k < count; k++)
-            pages[k] = surface_page_entry(lite, list, n, i + k) >> 2;
-        map_guest_pages(lite, base + (i << 14), pages, count);
-        i += count;
+    for (uint64_t start = 0; start < n; start += SURFACE_TABLE_ENTRIES) {
+        if (start) table = surface_page_table(lite, list, n, start);
+        if (!table) continue; /* Missing leaf: vm_allocate already zeroed its pages. */
+        uint64_t end = MIN(n - start, SURFACE_TABLE_ENTRIES);
+        for (uint64_t i = 0; i < end;) {
+            uint64_t count = MIN(end - i, sizeof pages / sizeof pages[0]);
+            for (uint64_t k = 0; k < count; k++) {
+                uint32_t entry = table[i + k];
+                pages[k] = (entry & 3) == 1 ? entry >> 2 : 0;
+            }
+            map_guest_pages(lite, address + ((start + i) << 14), pages, count);
+            i += count;
+        }
     }
     surface->object = [device newBufferWithBytesNoCopy:surface->mapped length:surface->length options:MTLResourceStorageModeShared
                                            deallocator:^(void *at, NSUInteger size) { vm_deallocate(mach_task_self(), (vm_address_t)at, size); }];
@@ -1331,8 +1333,10 @@ static uint32_t surface_page_entry(HvPvgLite *lite, uint32_t list, uint64_t n, u
         if (copy_all < 0) copy_all = getenv("HV_PVG_PLANAR_COPY") != NULL;
         if (copy_all || !surface->mapping_in_buffer) [self newIOSurface:surface mapping:mapping];
     }
-    fprintf(stderr, "hengevm: pvg-metal: surface %llu: %llux%llu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", mapping, (unsigned long long)sw, (unsigned long long)sh, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], planes);
-        return surface;
+    if (surfaces_mapped++ < 8 || dump) {
+        fprintf(stderr, "hengevm: pvg-metal: surface %llu: %llux%llu, row %llu, %llu KB, fourcc %c%c%c%c planes %u\n", mapping, (unsigned long long)sw, (unsigned long long)sh, row, alloc >> 10, desc[7], desc[6], desc[5], desc[4], planes);
+    }
+    return surface;
 }
 
 /* The surface under a mapping id as the guest describes it now. macOS 14's driver reuses ids for new surfaces
@@ -2552,7 +2556,9 @@ typedef struct {
     if (++execs % 2000 == 0) {
         static double t0;
         if (!t0) t0 = now_seconds();
-        fprintf(stderr, "hengevm: pvg-metal: %llu execs, %llu draws, %llu failed, %llu synced, %llu remaps, %.0f s; encoding %.2f s, waiting for the GPU %.2f s\n", (unsigned long long)execs, (unsigned long long)draws, (unsigned long long)failed, (unsigned long long)synced, (unsigned long long)remaps, now_seconds() - t0, encode_time, gpu_wait_time);
+        fprintf(stderr, "hengevm: pvg-metal: %llu execs, %llu draws, %llu failed, %llu synced, %llu remaps, %.0f s; encoding %.2f s, waiting for the GPU %.2f s, %llu surface mappings\n",
+                (unsigned long long)execs, (unsigned long long)draws, (unsigned long long)failed, (unsigned long long)synced,
+                (unsigned long long)remaps, now_seconds() - t0, encode_time, gpu_wait_time, (unsigned long long)surfaces_mapped);
         encode_time = gpu_wait_time = 0;
     }
     return YES;
