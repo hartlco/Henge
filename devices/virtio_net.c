@@ -20,6 +20,7 @@ static void notify(HvVirtio *v, int q) {
         uint32_t len = hv_virtq_read(v, &e, HDR_LEN, frame, sizeof frame);
         if (n->transmit) n->transmit(n->opaque, frame, len);
         n->tx_frames++;
+        n->tx_bytes += len;
         hv_virtq_push(v, q, &e, 0);
         any = 1;
     }
@@ -43,6 +44,7 @@ static int push_rx(HvVirtioNet *n, const uint8_t *frame, uint32_t len, int *noti
     hv_virtq_push(v, RXQ, &e, HDR_LEN + len);
     *notify = 1;
     n->rx_frames++;
+    n->rx_bytes += len;
     return 1;
 }
 

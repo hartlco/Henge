@@ -675,9 +675,12 @@ struct SessionView: View {
             tick += 1
             if tick % 10 == 0 {
                 let gpuFrames = henge_vm_gpu_frames()
+                var sentBytes: UInt64 = 0, receivedBytes: UInt64 = 0
+                henge_vm_net_bytes(&sentBytes, &receivedBytes)
+                let cpuMilliseconds = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) / 1_000_000
                 HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
                              + "network tx \(framesOut), rx \(framesIn), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
-                             + "thermal \(Self.thermalLabel(heat))")
+                             + "thermal \(Self.thermalLabel(heat)), network bytes tx \(sentBytes), rx \(receivedBytes), process CPU ms \(cpuMilliseconds)")
                 lastGPUFrames = gpuFrames
                 JITBootstrap.releaseLingeringDebugger()
             }

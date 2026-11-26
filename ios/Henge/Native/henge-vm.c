@@ -363,6 +363,19 @@ uint64_t henge_vm_net_frames(int sent) {
     pthread_rwlock_unlock(&api_lock);
     return result;
 }
+void henge_vm_net_bytes(uint64_t *sent, uint64_t *received) {
+    *sent = *received = 0;
+    if (!lock_running()) return;
+    HvVirtioNet *net = hv_vm_board()->net;
+    if (net) {
+        HvMachine *m = hv_vm_machine();
+        hv_dev_lock(m);
+        *sent = net->tx_bytes;
+        *received = net->rx_bytes;
+        hv_dev_unlock(m);
+    }
+    pthread_rwlock_unlock(&api_lock);
+}
 int henge_vm_cpus_on(void) {
     if (!lock_running()) return 0;
     int n = 0;

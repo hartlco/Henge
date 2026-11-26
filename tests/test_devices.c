@@ -547,6 +547,7 @@ static void test_virtio_net(void) {
     wr16(bar + 0x3000 + 4, 1);
     check("TX frame length", sent_len, 60);
     check("TX frame bytes", sent[59], 59);
+    check("TX byte count", board.net->tx_bytes, 60);
     /* receive */
     uint8_t frame[64];
     for (int i = 0; i < 64; i++) frame[i] = (uint8_t)(0xa0 + i);
@@ -559,6 +560,7 @@ static void test_virtio_net(void) {
     uint32_t used_len;
     memcpy(&used_len, ram(rxq + 0x2000 + 8), 4);
     check("RX used length", used_len, 76);
+    check("RX byte count", board.net->rx_bytes, 64);
 }
 
 /* The memory balloon: a new target reaches the driver (config change interrupt), inflated 16 KB pages go back

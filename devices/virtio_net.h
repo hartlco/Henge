@@ -11,6 +11,7 @@ typedef struct HvVirtioNet {
     void (*transmit)(void *opaque, const uint8_t *frame, uint32_t len);
     void *opaque;
     uint64_t tx_frames, rx_frames, rx_dropped;
+    uint64_t tx_bytes, rx_bytes; /* Ethernet frames, excluding the virtio header */
 } HvVirtioNet;
 
 HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6]);
