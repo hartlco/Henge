@@ -243,7 +243,11 @@ static void *net_thread(void *unused) {
         int r = poll(pfds, (nfds_t)npfd, (int)timeout);
         if (pfds[0].revents & POLLIN) {
             char buf[64];
-            while (read(wake_pipe[0], buf, sizeof buf) > 0) {}
+            /* A short read drains the pending wakes. A later write wakes poll again. */
+            ssize_t n;
+            do {
+                n = read(wake_pipe[0], buf, sizeof buf);
+            } while (n == sizeof buf || (n < 0 && errno == EINTR));
         }
         slirp_pollfds_poll(slirp, r < 0, get_revents, NULL);
         now = now_ms();
