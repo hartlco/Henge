@@ -49,6 +49,7 @@ enum HengeLog {
     /// without limit.
     private static let ringLimit = 4000
     private static var ring: [String] = []
+    private static var oldestLine = 0
     private static let ringLock = NSLock()
 
     static var logFileURL: URL {
@@ -58,7 +59,12 @@ enum HengeLog {
 
     static func recentLines(_ n: Int = 400) -> [String] {
         ringLock.lock(); defer { ringLock.unlock() }
-        return Array(ring.suffix(n))
+        let count = max(0, min(n, ring.count))
+        let end = ring.count == ringLimit ? oldestLine : ring.count
+        if count <= end { return Array(ring[(end - count)..<end]) }
+        var lines = Array(ring.suffix(count - end))
+        lines.append(contentsOf: ring.prefix(end))
+        return lines
     }
 
     // MARK: - Startup
@@ -289,8 +295,12 @@ enum HengeLog {
     ///   meaning the C side already sent it to os_log itself.
     private static func emit(_ line: String, fromStream: Bool) {
         ringLock.lock()
-        ring.append(line)
-        if ring.count > ringLimit { ring.removeFirst(ring.count - ringLimit) }
+        if ring.count < ringLimit {
+            ring.append(line)
+        } else {
+            ring[oldestLine] = line
+            oldestLine = (oldestLine + 1) % ringLimit
+        }
         ringLock.unlock()
 
         // The C side (henge-ios-jit.c, henge-display.c) writes to os_log itself as
