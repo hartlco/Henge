@@ -2,6 +2,7 @@
 #define HENGEVM_DISK_H
 
 #include <stdint.h>
+#include <sys/uio.h>
 
 /* A raw disk image file, optionally starting `offset` bytes in (QEMU's vmapple
    notes say the first 16 KB of auxiliary.bin is metadata the guest never sees). */
@@ -17,6 +18,9 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly);
 void hv_disk_close(HvDisk *d);
 /* Return 0, or -1 on an I/O error or an access past the end. */
 int hv_disk_read(HvDisk *d, uint64_t off, void *buf, uint64_t len);
+/* Read into several buffers. Positive results count bytes read, zero asks
+   the caller to use scalar reads, and -1 reports an I/O error. */
+ssize_t hv_disk_readv(HvDisk *d, uint64_t off, const struct iovec *buffers, int count);
 int hv_disk_write(HvDisk *d, uint64_t off, const void *buf, uint64_t len);
 int hv_disk_flush(HvDisk *d);
 

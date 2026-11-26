@@ -431,6 +431,31 @@ static void test_virtio_blk(HvDisk *aux) {
     hv_virtio_blk_drain(board.aux_blk); /* requests complete on the worker thread */
     check("unknown request UNSUPP", ram(status)[0], 2);
     check("four requests used", used_idx(ring), 4);
+
+    /* The last buffer can hold both payload and status. Leave gaps so a read
+       into the wrong guest page or beyond the status byte is visible. */
+    h[0] = 0;
+    h[2] = 5;
+    memcpy(ram(hdr), h, sizeof h);
+    const uint64_t pages[] = {data + 0x8000, data + 0x10000, data + 0x6000};
+    const uint32_t parts[] = {301, 366, 357};
+    put_desc(ring, 0, hdr, 16, 1, 1);
+    for (int i = 0; i < 3; i++) {
+        memset(ram(pages[i] - 1), 0xaa, parts[i] + 3);
+        put_desc(ring, i + 1, pages[i], parts[i] + (i == 2), i == 2 ? 2 : 3, i + 2);
+    }
+    offer(ring, 0);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    check("scattered read completed", used_idx(ring), 5);
+    check("scattered read used length", rd32(ring + 0x2000 + 8 + 4 * 8), 1025);
+    for (int i = 0, pos = 0; i < 3; i++) {
+        check("scattered read data", memcmp(ram(pages[i]), want + pos, parts[i]), 0);
+        check("scattered read leading guard", ram(pages[i] - 1)[0], 0xaa);
+        check("scattered read trailing guard", ram(pages[i])[parts[i] + (i == 2)], 0xaa);
+        pos += parts[i];
+    }
+    check("scattered read inline status", ram(pages[2])[parts[2]], 0);
     rd8(bar + 0x1000);
 }
 

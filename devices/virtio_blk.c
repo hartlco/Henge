@@ -21,10 +21,46 @@
 #define S_IOERR 1
 #define S_UNSUPP 2
 
+/* The Mac supplies a request header followed by its read buffers. Only
+   bytes the disk actually delivered can invalidate translated guest code. */
+static ssize_t scatter_read(HvVirtioBlk *b, const HvVirtqElem *e, uint64_t disk_off, uint32_t len) {
+    struct iovec buffers[HV_VIRTQ_MAX_SEGS];
+    uint32_t left = len;
+    int count = 0;
+    if (e->seg[0].write) return 0;
+    for (int i = 1; i < e->nseg && left; i++) {
+        const HvVirtqSeg *g = &e->seg[i];
+        if (!g->write || !g->len) return 0;
+        uint32_t n = g->len < left ? g->len : left;
+        void *p = hv_phys_ptr(b->vio.m, g->addr, n);
+        if (!p) return 0;
+        buffers[count++] = (struct iovec){p, n};
+        left -= n;
+    }
+    if (left || count < 2) return 0;
+    ssize_t done = hv_disk_readv(b->disk, disk_off, buffers, count);
+    if (done <= 0) return done;
+    left = (uint32_t)done;
+    for (int i = 0; left; i++) {
+        uint32_t n = buffers[i].iov_len < left ? (uint32_t)buffers[i].iov_len : left;
+        hv_dma_written(b->vio.m, e->seg[i + 1].addr, n);
+        left -= n;
+    }
+    return done;
+}
+
 /* Disk I/O straight between the file and the guest's buffers: the
    segments of one direction, skipping `off` bytes of them, `len` bytes in all.
    Returns 0, or -1 on a host error or a buffer outside guest RAM. */
 static int seg_io(HvVirtioBlk *b, const HvVirtqElem *e, int writable, uint32_t off, uint64_t disk_off, uint32_t len) {
+    if (writable && !off && e->nseg > 3) {
+        ssize_t done = scatter_read(b, e, disk_off, len);
+        if (done < 0) return -1;
+        if ((uint32_t)done == len) return 0;
+        off = (uint32_t)done;
+        disk_off += off;
+        len -= off;
+    }
     for (int s = 0; s < e->nseg && len; s++) {
         const HvVirtqSeg *g = &e->seg[s];
         if (g->write != writable) continue;
