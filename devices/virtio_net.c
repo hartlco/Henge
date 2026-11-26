@@ -7,6 +7,7 @@
 #define F_STATUS (1ull << 16)
 #define RXQ 0
 #define TXQ 1
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
 #define HDR_LEN 12 /* virtio_net_hdr with num_buffers (VERSION_1) */
 #define MAX_FRAME 65550
 
@@ -24,7 +25,13 @@ static void notify(HvVirtio *v, int q) {
         hv_virtq_push(v, q, &e, 0);
         any = 1;
     }
-    if (any) hv_virtio_interrupt(v);
+    if (any) {
+        /* Publish the used index before checking whether the driver wants a TX interrupt. */
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        const uint16_t *flags = hv_phys_ptr(v->m, v->q[TXQ].avail, sizeof *flags);
+        if (!flags || !(__atomic_load_n(flags, __ATOMIC_ACQUIRE) & VIRTQ_AVAIL_F_NO_INTERRUPT))
+            hv_virtio_interrupt(v);
+    }
 }
 
 static int push_rx(HvVirtioNet *n, const uint8_t *frame, uint32_t len, int *notify) {

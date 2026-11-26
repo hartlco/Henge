@@ -548,6 +548,13 @@ static void test_virtio_net(void) {
     check("TX frame length", sent_len, 60);
     check("TX frame bytes", sent[59], 59);
     check("TX byte count", board.net->tx_bytes, 60);
+    check("TX completion interrupt", rd8(bar + 0x1000) & 1, 1);
+    wr16(txq + 0x1000, 1); /* driver polls the TX used ring */
+    offer(txq, 0);
+    wr16(bar + 0x3000 + 4, 1);
+    check("polled TX completion returned", used_idx(txq), 2);
+    check("polled TX frame transmitted", board.net->tx_bytes, 120);
+    check("polled TX skips interrupt", rd8(bar + 0x1000) & 1, 0);
     /* receive */
     uint8_t frame[64];
     for (int i = 0; i < 64; i++) frame[i] = (uint8_t)(0xa0 + i);
@@ -556,6 +563,11 @@ static void test_virtio_net(void) {
     offer(rxq, 0);
     wr16(bar + 0x3000, 0);
     check("RX delivered", hv_virtio_net_receive(board.net, frame, 64), 1);
+    check("RX can interrupt while TX polls", rd8(bar + 0x1000) & 1, 1);
+    wr16(txq + 0x1000, 0);
+    offer(txq, 0);
+    wr16(bar + 0x3000 + 4, 1);
+    check("reenabled TX interrupts", rd8(bar + 0x1000) & 1, 1);
     check("RX bytes", memcmp(ram(buf + 0x1000 + 12), frame, 64), 0);
     uint32_t used_len;
     memcpy(&used_len, ram(rxq + 0x2000 + 8), 4);
