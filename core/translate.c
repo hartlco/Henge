@@ -471,10 +471,10 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
         e->site_direct = !check && !xa;
     }
     if (check) link_here(e, to_exit, p0);
-    put(e, STR_X(30, 28, HV_CPU_X(30)));
+    if (!(e->n & 1)) put(e, 0xd503201f); /* align the slot address after the branch */
+    put(e, 0x10000007u | 3u << 5);       /* adr x7, data */
     put(e, LDR_X(15, 28, HV_CPU_CHAIN_THUNK));
-    if ((e->n & 1) == 0) put(e, 0xd503201f);                         /* nop: the data starts 8-byte aligned */
-    put(e, BLR_X(15));
+    put(e, BR_X(15));
     put(e, (uint32_t)(uintptr_t)slot);
     put(e, (uint32_t)((uintptr_t)slot >> 32));
     put(e, (uint32_t)target);
