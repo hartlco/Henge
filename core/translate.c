@@ -107,6 +107,7 @@ typedef struct {
     int32_t goff[HV_MAX_BLOCK_INSNS];   /* the access's address minus the base at the group's first */
     uint32_t after[HV_MAX_BLOCK_INSNS]; /* where each instruction's translation ends */
     uint32_t cur_i;
+    uint32_t copy_live;                 /* guest x6, x7 or x15 still in its own host register after copied instructions */
     int nogroup;                        /* translating plain (copies, or the retry when they do not fit) */
     int u_live, u_prev;                 /* slot + 1 when x15 holds that group's addend after the last instruction */
     int overflow;
@@ -647,7 +648,12 @@ static void translate_copy(Emit *e, uint32_t insn) {
         int read = 0;
         for (int f = 0; f < 4; f++)
             if (stolen[f] == guest_of[k] && (f || rd_read)) read = 1;
-        if (read) put(e, LDR_X(scratch_of[k], 28, slot_of(guest_of[k])));
+        uint32_t bit = 1u << scratch_of[k];
+        int own = scratch_of[k] == guest_of[k];
+        if (read && !(own && (e->copy_live & bit))) put(e, LDR_X(scratch_of[k], 28, slot_of(guest_of[k])));
+        /* A stand-in for x18 or x28 may borrow one of these same scratch registers. */
+        if (own) e->copy_live |= bit;
+        else e->copy_live &= ~bit;
     }
     uint32_t out = insn;
     for (int f = 0; f < 4; f++) {
@@ -1776,6 +1782,7 @@ static int is_fp_insn(uint32_t insn) {
 /* Returns 1 if the instruction ends the block. */
 static int translate_one(Emit *e, uint32_t insn, uint64_t pc) {
     HvInsnKind kind = hv_classify(insn);
+    if (kind != HV_INSN_COPY) e->copy_live = 0;
     if ((e->flags & HV_BLOCK_FPOFF) && kind != HV_INSN_UNDEFINED && is_fp_insn(insn)) {
         put_helper(e, pc, insn, HV_OP_FPTRAP);
         return 1;
@@ -2182,6 +2189,7 @@ static int translate_emit(HvMachine *m, HvBlock *b, const uint32_t *code, uint32
     e->m = m;
     e->nogroup = nogroup;
     e->u_live = e->u_prev = 0;
+    e->copy_live = 0;
 
     /* No prologue: hv_enter, chained exits and the indirect-branch cache all
        enter with guest x0 and x1 live. */

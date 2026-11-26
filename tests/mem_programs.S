@@ -77,6 +77,16 @@ PROGRAM stolen_mem
     ldp x28, x18, [x18, #32]
     stp x28, x18, [sp, #-32]!
     ldp x9, x10, [sp], #32
+    // x28 borrows a scratch register, and the load uses scratch for its address.
+    mov x6, #17
+    mov x7, #33
+    mov x15, #65
+    add x28, x0, #64
+    eor x11, x6, x7
+    movk x15, #2, lsl #16
+    ldr x12, [x28]
+    add x13, x6, x15
+    add x14, x13, x7
 END stolen_mem
 
 PROGRAM pairs
