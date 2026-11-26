@@ -72,6 +72,7 @@ $(B)/%.o: core/%.c core/*.h host/*.h | $(B)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(B)/%.o: host/%.c host/*.h core/*.h devices/*.h | $(B)
 	$(CC) $(CFLAGS) -c $< -o $@
+$(B)/enter.o: host/enter.S core/chain_layout.h
 $(B)/%.o: host/%.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/%.o: devices/%.c devices/*.h core/*.h host/*.h | $(B)
@@ -148,7 +149,7 @@ $(IB)/%.o: %.c core/*.h host/*.h devices/*.h
 $(IB)/devices/pvg_metal.o: devices/pvg_metal.m devices/*.h core/*.h host/*.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) $(IOS_CFLAGS) -fobjc-arc -Wno-unused-parameter -Wno-deprecated-declarations -c $< -o $@
-$(IB)/host/enter.o: host/enter.S
+$(IB)/host/enter.o: host/enter.S core/chain_layout.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) -c $< -o $@
 $(IB)/libhengevm.a: $(IOS_OBJ)

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "chain_layout.h"
 #include "classify.h"
 #include "memop.h"
 #include "mmu.h"
@@ -471,9 +472,16 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
         e->site_direct = !check && !xa;
     }
     if (check) link_here(e, to_exit, p0);
-    if (!(e->n & 1)) put(e, 0xd503201f); /* align the slot address after the branch */
-    put(e, 0x10000007u | 3u << 5);       /* adr x7, data */
+    /* Use the alignment word, when needed, to give different targets different host
+       branches. Each indirect branch then has fewer destinations to predict. */
+    int pad = !(e->n & 1);
+    put(e, 0x10000007u | (pad ? 4u : 3u) << 5); /* adr x7, data */
     put(e, LDR_X(15, 28, HV_CPU_CHAIN_THUNK));
+    if (pad) {
+        uint32_t entry = (uint32_t)((target >> 2) ^ (target >> 6) ^ (target >> 10)) & (HV_CHAIN_ENTRIES - 1);
+        uint32_t offset = entry << HV_CHAIN_ENTRY_SHIFT;
+        put(e, 0x910001efu | offset << 10); /* add x15, x15, #offset */
+    }
     put(e, BR_X(15));
     put(e, (uint32_t)(uintptr_t)slot);
     put(e, (uint32_t)((uintptr_t)slot >> 32));

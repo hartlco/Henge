@@ -1,3 +1,5 @@
+#include "../core/chain_layout.h"
+
 // Entering and leaving translated code.
 //
 // hv_enter(HvCpu *cpu, void *block) saves the host's callee-saved registers,
@@ -274,15 +276,21 @@ _hv_helper_thunk:
 // target VA} and x30 holds the guest's link register. Follows the slot when
 // chained beyond the stub's B (out of range), else leaves for the dispatcher,
 // naming the slot (last_stub) unless an exit was asked for.
+    .p2align HV_CHAIN_ENTRY_SHIFT
 _hv_chain_thunk:
+    .rept HV_CHAIN_ENTRIES
     ldr w15, [x28, #CPU_EXIT_REQ]
-    cbnz w15, 1f
+    cbnz w15, Lchain_exit
     ldr x6, [x7]
     ldr x15, [x6]
-    cbz x15, 2f
+    cbz x15, Lchain_miss
     br x15
-2:  str x6, [x28, #CPU_LAST_STUB]
-1:  stp x0, x1, [x28]
+    .p2align HV_CHAIN_ENTRY_SHIFT
+    .endr
+Lchain_miss:
+    str x6, [x28, #CPU_LAST_STUB]
+Lchain_exit:
+    stp x0, x1, [x28]
     ldr x0, [x7, #8]
     str x0, [x28, #CPU_PC]
     ldr x1, [x28, #CPU_EXIT]
