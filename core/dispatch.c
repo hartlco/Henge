@@ -82,8 +82,6 @@ void hv_evict_blocks(HvMachine *m) {
     }
     uint64_t t0 = mach_absolute_time();
     uint32_t seg = hv_jit_evict_next(r);
-    const uint32_t *lo = r->base + (size_t)seg * r->seg_words, *hi = lo + r->seg_words;
-#define GONE(p) ((const uint32_t *)(uintptr_t)(p) >= lo && (const uint32_t *)(uintptr_t)(p) < hi)
     m->stats.evictions++;
     reset_retrans();
     for (int i = 0; i < m->ncpus; i++)
@@ -95,23 +93,17 @@ void hv_evict_blocks(HvMachine *m) {
         }
     /* Phase 0: drop only the blocks in the evicted segment and unlink them from the hash table. */
     uint32_t dropped = 0;
-    memset(m->hash_seen, 0, (HV_BLOCK_HASH / 32) * sizeof *m->hash_seen);
     uint32_t first_c = m->seg_chunk_head[seg], last_c = m->seg_chunk_tail[seg];
     for (uint32_t c = first_c; c != ~0u; c = m->chunk_next[c]) {
         uint32_t len = m->chunk_len[c];
         HvBlock *arr = &m->blocks[(size_t)c * m->block_chunk];
         for (uint32_t i = 0; i < len; i++) {
             HvBlock *b = &arr[i];
-            uint32_t h = hv_block_hash(b->va, b->pa, b->flags);
-            if (!((m->hash_seen[h >> 5] >> (h & 31)) & 1u)) {
-                m->hash_seen[h >> 5] |= 1u << (h & 31);
-                HvBlock **pp = &m->hash[h];
-                while (*pp) {
-                    HvBlock *cur = *pp;
-                    if (GONE(cur->code)) *pp = cur->next;
-                    else pp = &cur->next;
-                }
-            }
+            if (b->hash_prev)
+                m->blocks[b->hash_prev - 1].next = b->next;
+            else
+                m->hash[hv_block_hash(b->va, b->pa, b->flags)] = b->next;
+            if (b->next) b->next->hash_prev = b->hash_prev;
         }
         dropped += len;
         m->chunk_len[c] = 0;
@@ -210,9 +202,8 @@ void hv_evict_blocks(HvMachine *m) {
     m->stats.evict_phase[2] += mach_absolute_time() - t2;
     if (poison_on()) { /* HV_JIT_POISON: anything still leading into the segment faults there */
         m->gen_checks = 1;
-        hv_jit_poison(r, (uint32_t *)lo, r->seg_words);
+        hv_jit_poison(r, r->base + (size_t)seg * r->seg_words, r->seg_words);
     }
-#undef GONE
     m->stats.evict_ticks += mach_absolute_time() - t0;
 }
 
@@ -422,6 +413,7 @@ static HvBlock *lookup(HvCpu *cpu, uint64_t va, uint64_t pa, uint32_t flags, con
     }
     m->nblocks++;
     b->next = m->hash[h];
+    if (b->next) b->next->hash_prev = (uint32_t)(b - m->blocks) + 1;
     __atomic_store_n(&m->hash[h], b, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&m->tr_mu);
     return b;

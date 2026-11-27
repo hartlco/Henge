@@ -51,6 +51,7 @@ typedef struct HvBlock {
     uint32_t *code;
     struct HvBlock *next;
     uint32_t maker;      /* the CPU that translated it (index + 1; 0: not a CPU, as in tests) */
+    uint32_t hash_prev;  /* previous block index + 1 in this bucket, or 0 at the head */
 } HvBlock;
 
 #define HV_BLOCK_EL1   1u        /* translated for EL1 (selects tlb[1]) */
@@ -289,7 +290,6 @@ typedef struct HvMachine {
     uint16_t *chunk_len, *chunk_seg;
     uint32_t *chunk_next;
     uint32_t seg_chunk_head[HV_JIT_MAX_SEGS], seg_chunk_tail[HV_JIT_MAX_SEGS];
-    uint32_t *hash_seen;     /* HV_BLOCK_HASH / 32 bitmap used during eviction to unlink each bucket once */
     HvCpu *cpu;              /* CPU 0: the one that polls devices */
     HvCpu *cpus[HV_MAX_CPUS]; /* every CPU, so device and invalidation code can ask them to leave */
     int ncpus;

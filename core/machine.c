@@ -121,8 +121,7 @@ static int init_rest(HvMachine *m) {
     m->chunk_len = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_len);
     m->chunk_seg = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_seg);
     m->chunk_next = calloc(m->nblock_chunks ? m->nblock_chunks : 1, sizeof *m->chunk_next);
-    m->hash_seen = calloc(HV_BLOCK_HASH / 32, sizeof *m->hash_seen);
-    if (!m->chunk_len || !m->chunk_seg || !m->chunk_next || !m->hash_seen) return -1;
+    if (!m->chunk_len || !m->chunk_seg || !m->chunk_next) return -1;
     hv_reset_block_chunks(m);
     m->stop_pc = ~0ull;
     m->stop_pc2 = ~0ull;
@@ -416,7 +415,6 @@ void hv_machine_free(HvMachine *m) {
     free(m->chunk_len);
     free(m->chunk_seg);
     free(m->chunk_next);
-    free(m->hash_seen);
     for (int i = 0; i < HV_JIT_MAX_SEGS; i++) free(m->seg_slots[i]);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
         /* hv_run keeps a thread send right for statistics; CPU workers have ended. */

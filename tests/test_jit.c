@@ -105,6 +105,20 @@ static int test_chain_stubs(HvMachine *m, uint64_t sp) {
     return bad;
 }
 
+/* Walk the buckets after the ring turns, including older translations of the same PC. */
+static int block_chains_ok(HvMachine *m) {
+    int count = 0;
+    for (uint32_t h = 0; h < HV_BLOCK_HASH; h++) {
+        uint32_t prev = 0;
+        for (HvBlock *b = m->hash[h]; b; b = b->next) {
+            if (b->hash_prev != prev || hv_block_hash(b->va, b->pa, b->flags) != h || ++count > m->nblocks)
+                return 0;
+            prev = (uint32_t)(b - m->blocks) + 1;
+        }
+    }
+    return count == m->nblocks;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static HvMachine m;
@@ -197,6 +211,10 @@ int main(void) {
                 if (!bad) bad = compare_cpus(programs[i].name, &native, &jit);
                 if (bad) printf("%-12s with a ring, round %d: FAIL\n", programs[i].name, round);
                 bad_rounds += bad != 0;
+            }
+            if (!block_chains_ok(&ring)) {
+                printf("ring hash chains, round %d: FAIL\n", round);
+                return 1;
             }
             uint64_t from = (uint64_t)(uintptr_t)jit_programs_begin & ~16383ull, to = (uint64_t)(uintptr_t)jit_programs_finish;
             for (uint64_t pa = from; pa < to; pa += 16384) hv_invalidate_code(&ring, pa < (uint64_t)(uintptr_t)jit_programs_begin ? (uint64_t)(uintptr_t)jit_programs_begin : pa);
