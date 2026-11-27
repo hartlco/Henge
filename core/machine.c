@@ -140,7 +140,10 @@ static int init_rest(HvMachine *m) {
     m->slot_tnext = calloc(m->max_slots, sizeof *m->slot_tnext);
     m->slot_free = calloc(m->max_slots, sizeof *m->slot_free);
     if (!m->slot_free) return -1;
-    /* HV_JIT_SEGMENTS: the code cache is a ring of this many segments (default 8; 1: no ring, a full region drops
+    /* Reclaim 64 MiB at a time in the app's 1.5 GiB cache. Every guest CPU waits during an eviction. */
+    if (!m->jit.owned && bytes == (1536ull << 20) && !getenv("HV_JIT_SEGMENTS"))
+        hv_knob[HV_K_JITSEGS] = 24;
+    /* HV_JIT_SEGMENTS: the code cache is a ring of this many segments (normally 8; 1: no ring, a full region drops
        everything). The boot of macOS 27 on a phone fills 1.5 GB in about three minutes and kept doing so: dropping
        it all meant translating the whole working set again each time. */
     hv_jit_ring(&m->jit, hv_knob[HV_K_JITSEGS] ? (uint32_t)hv_knob[HV_K_JITSEGS] : 8);
