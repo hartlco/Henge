@@ -190,11 +190,19 @@ enum HengeLog {
                 let n = read(fd, &buf, buf.count)
                 if n < 0 && errno == EINTR { continue }
                 if n <= 0 { return }
-                pending.append(contentsOf: buf[..<n])
-                while let nl = pending.firstIndex(of: 0x0A) {
-                    if let line = String(data: pending[..<nl], encoding: .utf8) { emitLine(line) }
-                    pending.removeSubrange(...nl)
+                var start = 0
+                for end in 0..<n where buf[end] == 0x0A {
+                    let bytes = buf[start..<end]
+                    if pending.isEmpty {
+                        if let line = String(bytes: bytes, encoding: .utf8) { emitLine(line) }
+                    } else {
+                        pending.append(contentsOf: bytes)
+                        if let line = String(data: pending, encoding: .utf8) { emitLine(line) }
+                        pending.removeAll(keepingCapacity: true)
+                    }
+                    start = end + 1
                 }
+                pending.append(contentsOf: buf[start..<n])
             }
         }
 
