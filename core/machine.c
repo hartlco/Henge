@@ -48,6 +48,17 @@ int hv_knob_set(HvMachine *m, const char *name, int value) {
     return 0;
 }
 
+HvDispatchCounts hv_dispatch_counts(const HvMachine *m) {
+    HvDispatchCounts total = {0};
+    for (int i = 0; i < HV_MAX_CPUS; i++) {
+        const HvDispatchCounts *c = &m->percpu[i].dispatch;
+        total.blocks += __atomic_load_n(&c->blocks, __ATOMIC_RELAXED);
+        total.exceptions += __atomic_load_n(&c->exceptions, __ATOMIC_RELAXED);
+        total.interrupts += __atomic_load_n(&c->interrupts, __ATOMIC_RELAXED);
+    }
+    return total;
+}
+
 int hv_machine_init(HvMachine *m, size_t jit_bytes) {
     knobs_init();
     memset(m, 0, sizeof *m);

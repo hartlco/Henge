@@ -67,6 +67,7 @@ static void *read_ui(void *unused) {
         henge_vm_snapshot(image, 2, 2);
         henge_vm_pointer(&x, &y);
         henge_vm_cpus_on();
+        henge_vm_blocks();
         henge_vm_gpu_frames();
         henge_vm_balloon(-1);
         henge_vm_set_display_layer(NULL);
@@ -114,6 +115,7 @@ int main(void) {
         if (rc) fprintf(stderr, "boot %d: %s\n", i, error);
         check("boot succeeds without restarting app", rc == 0);
         if (rc) break;
+        uint64_t live_blocks = henge_vm_blocks();
         if (outcome == HENGE_VM_OUTCOME_HOST_STOP) {
             henge_vm_mouse_button(0, 1);
             henge_vm_mouse_button(1, 1);
@@ -124,6 +126,8 @@ int main(void) {
         for (int n = 0; n < 3000 && henge_vm_state() != 2; n++) usleep(1000);
         check("terminal state is published after cleanup", henge_vm_state() == 2);
         if (henge_vm_state() != 2) exit(1);
+        check("stopped Mac keeps its block count", henge_vm_blocks() >= live_blocks);
+        if (outcome != HENGE_VM_OUTCOME_HOST_STOP) check("guest power request counted", henge_vm_blocks() > 0);
         check("power outcome preserved", henge_vm_exit_outcome() == outcome);
         check("start is available again", henge_vm_can_start());
         check("new generation", henge_vm_generation() == (uint64_t)i + 1);
@@ -153,15 +157,20 @@ int main(void) {
         check("suspend saves", rc == 0 && henge_vm_state() == 4 && access(snap, F_OK) == 0);
         volatile uint64_t *count = (volatile uint64_t *)hv_vm_board()->ram;
         uint64_t c1 = *count;
+        uint64_t paused_blocks = henge_vm_blocks();
         usleep(20000);
+        check("paused block count stays available", paused_blocks > 0 && henge_vm_blocks() == paused_blocks);
         check("paused: the counter stands still", c1 > 0 && *count == c1);
         check("continue runs it on", henge_vm_continue() == 0 && henge_vm_state() == 1);
         for (int n = 0; n < 1000 && *count == c1; n++) usleep(1000);
         check("continued: the counter moves", *count > c1);
         rc = henge_vm_suspend(snap, "test", error, sizeof error);
         uint64_t c2 = *count;
+        uint64_t final_blocks = henge_vm_blocks();
+        check("continued VM counts more blocks", final_blocks > paused_blocks);
         check("second suspend saves", rc == 0 && c2 > c1);
         henge_vm_stop();
+        check("stopping a paused Mac keeps its final count", henge_vm_blocks() == final_blocks);
         check("a paused Mac stops", henge_vm_state() == 2 && hv_vm_board()->ram == NULL);
         uint64_t bytes = 0;
         check("the save is whole", henge_vm_saved_ok(snap, "test", &bytes, NULL) == 0 && bytes > 0);

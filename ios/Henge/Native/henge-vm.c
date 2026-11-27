@@ -59,7 +59,7 @@ static void on_exit(int reason) {
     case HV_HALT_HOST: exit_outcome = HENGE_VM_OUTCOME_HOST_STOP; break;
     case HV_HALT_PANIC: exit_outcome = HENGE_VM_OUTCOME_PANIC; break;
     }
-    stopped_blocks = hv_vm_machine()->stats.blocks;
+    stopped_blocks = hv_dispatch_counts(hv_vm_machine()).blocks;
     stopped_tx = hv_net_tx_frames;
     stopped_rx = hv_net_rx_frames;
     /* The restore stack owns separate USB workers for the installer session.
@@ -182,6 +182,7 @@ int henge_vm_continue(void) {
     int r = hv_vm_continue();
     if (r != 0) {
         /* No threads for its CPUs: it cannot run on. Release it, as a stop would. */
+        stopped_blocks = hv_dispatch_counts(hv_vm_machine()).blocks;
         hv_vm_destroy();
         exit_outcome = HENGE_VM_OUTCOME_ERROR;
         state = 2;
@@ -312,6 +313,7 @@ void henge_vm_stop(void) {
     if (state == 4) { /* paused: its CPU threads have ended already, so nothing calls on_exit */
         pthread_rwlock_wrlock(&api_lock);
         if (state == 4) {
+            stopped_blocks = hv_dispatch_counts(hv_vm_machine()).blocks;
             hv_vm_destroy();
             exit_reason = HV_EXIT_HALT;
             exit_outcome = HENGE_VM_OUTCOME_HOST_STOP;
@@ -353,7 +355,8 @@ int henge_vm_knob(const char *name, int value) {
 }
 uint64_t henge_vm_blocks(void) {
     pthread_rwlock_rdlock(&api_lock);
-    uint64_t result = state == 1 ? hv_vm_machine()->stats.blocks : stopped_blocks;
+    int current = state;
+    uint64_t result = current == 0 || current == 2 ? stopped_blocks : hv_dispatch_counts(hv_vm_machine()).blocks;
     pthread_rwlock_unlock(&api_lock);
     return result;
 }

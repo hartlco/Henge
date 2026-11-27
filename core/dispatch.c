@@ -641,7 +641,7 @@ void hv_debug_el0_in_kernel(HvCpu *cpu, const char *what) {
                             "miss site %llx\n  recent:", b ? (unsigned long long)b->va : 0ull, b ? b->flags : 0, lo, m->nblocks,
                     (unsigned long long)m->stats.block_flushes, (unsigned long long)cpu->last_stub,
                     (unsigned long long)cpu->miss_site);
-            for (int k = 15; k >= 0; k--) fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->nrecent - 1 - k) & 15]);
+            for (int k = 15; k >= 0; k--) fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->dispatch.blocks - 1 - k) & 15]);
             fprintf(stderr, "\n  (%s) cpu %u el changes, oldest first:\n", what, cpu->index);
             for (int k = 15; k >= 0; k--) {
                 uint32_t i = (p->nelchg - 1 - k) & 15;
@@ -784,30 +784,28 @@ static void print_profile(HvMachine *m) {
     }
 }
 
-static void print_stats(HvCpu *cpu, int force) {
-    static uint64_t last_t, start_t;
+static void print_stats(HvCpu *cpu) {
+    HvMachine *m = cpu->m;
+    uint64_t now = mach_absolute_time();
+    if (!m->stats_start) m->stats_start = m->stats_last = now;
+    uint64_t ticks = now - m->stats_last;
+    if (ticks < (uint64_t)m->stats_interval * 24000000ull) return;
+
     /* This uses floating point, and the host FP registers hold the guest's state. */
     hv_fp_leave(cpu);
     uint64_t zero = 0;
     __asm__ volatile("msr fpcr, %0" ::"r"(zero));
-    static HvStats last;
-    HvMachine *m = cpu->m;
-    uint64_t now = mach_absolute_time();
-    if (!start_t) start_t = last_t = now;
-    if (!force && now - last_t < (uint64_t)m->stats_interval * 24000000ull) {
-        hv_fp_enter(cpu);
-        return;
-    }
-    double dt = (double)(now - last_t) / 24e6;
-    HvStats *s = &m->stats;
-#define RATE(f) ((double)(s->f - last.f) / dt)
+    double dt = (double)ticks / 24e6;
+    HvStats *s = &m->stats, *last = &m->previous_stats;
+    s->dispatch = hv_dispatch_counts(m);
+#define RATE(f) ((double)(s->f - last->f) / dt)
     fprintf(stderr,
             "stats %5.0fs: blocks %.2fM/s, translated %.0f/s (again: va %.0f%% va+pa %.0f%%; %.0f%% of time, %.1f insns, %.1fx), slow mem %.0fK/s, mrs %.0fK/s msr %.0fK/s sys %.0fK/s, "
             "exc %.0f/s irq %.0f/s, tlb flush %.0f/s, fetch walks %.0fK/s, wfi %.0f/s (%.0f%% idle), flushes %.0f/s (smc %.0f ic %.0f full %.0f), blocks held %d (%.0f MB, %llu full flushes, %llu evictions: %.0f ms (blocks %.0f, exits %.0f, icache %.0f), %.0fK blocks dropped, %.0fK exits unchained, %.0fK through slot alone), chained %.0f/s ijc fills %.0fK/s resets %.0f/s, el%u pc %llx\n",
-            (double)(now - start_t) / 24e6, RATE(blocks) / 1e6, RATE(translations), 100.0 * RATE(retrans_va) / (RATE(translations) + 1e-9), 100.0 * RATE(retrans_vapa) / (RATE(translations) + 1e-9), 100.0 * (double)(s->translate_ticks - last.translate_ticks) / (double)(now - last_t), RATE(translated_insns) / (RATE(translations) + 1e-9), RATE(translated_words) / (RATE(translated_insns) + 1e-9), RATE(helper[HV_OP_MEM]) / 1e3,
+            (double)(now - m->stats_start) / 24e6, RATE(dispatch.blocks) / 1e6, RATE(translations), 100.0 * RATE(retrans_va) / (RATE(translations) + 1e-9), 100.0 * RATE(retrans_vapa) / (RATE(translations) + 1e-9), 100.0 * (double)(s->translate_ticks - last->translate_ticks) / (double)ticks, RATE(translated_insns) / (RATE(translations) + 1e-9), RATE(translated_words) / (RATE(translated_insns) + 1e-9), RATE(helper[HV_OP_MEM]) / 1e3,
             RATE(helper[HV_OP_MRS]) / 1e3, RATE(helper[HV_OP_MSR]) / 1e3, RATE(helper[HV_OP_SYS]) / 1e3,
-            RATE(exceptions), RATE(interrupts), RATE(tlb_flushes), RATE(fetch_walks) / 1e3, RATE(wfi),
-            100.0 * (double)(s->wfi_ticks - last.wfi_ticks) / (double)(now - last_t), RATE(block_flushes), RATE(flush_smc),
+            RATE(dispatch.exceptions), RATE(dispatch.interrupts), RATE(tlb_flushes), RATE(fetch_walks) / 1e3, RATE(wfi),
+            100.0 * (double)(s->wfi_ticks - last->wfi_ticks) / (double)ticks, RATE(block_flushes), RATE(flush_smc),
             RATE(flush_ic), RATE(flush_full), m->nblocks, (double)hv_jit_extent(&m->jit) * 4 / (1 << 20), (unsigned long long)s->flush_full,
             (unsigned long long)s->evictions, (double)s->evict_ticks / 24e3, (double)s->evict_phase[0] / 24e3, (double)s->evict_phase[1] / 24e3, (double)s->evict_phase[2] / 24e3, (double)s->evict_blocks / 1e3, (double)s->evict_unchained / 1e3, (double)s->evict_slot_only / 1e3, RATE(chained), RATE(ijc_fills) / 1e3, RATE(ijc_resets), cpu->el,
             (unsigned long long)cpu->pc);
@@ -904,11 +902,11 @@ static void print_stats(HvCpu *cpu, int force) {
             static const char *kn[16] = {"copy", "pcrel", "branch", "branch-reg", "eret", "literal", "memory", "prefetch",
                                          "exception", "sysreg", "sys", "barrier", "wait", "pac", "undef", "?"};
             uint64_t ti = 0, tw = 0;
-            for (int k = 0; k < 16; k++) ti += s->kind_insns[k] - last.kind_insns[k], tw += s->kind_words[k] - last.kind_words[k];
+            for (int k = 0; k < 16; k++) ti += s->kind_insns[k] - last->kind_insns[k], tw += s->kind_words[k] - last->kind_words[k];
             if (ti) {
                 fprintf(stderr, "  inline words per insn %.2f:", (double)tw / ti);
                 for (int k = 0; k < 16; k++) {
-                    uint64_t i = s->kind_insns[k] - last.kind_insns[k], w = s->kind_words[k] - last.kind_words[k];
+                    uint64_t i = s->kind_insns[k] - last->kind_insns[k], w = s->kind_words[k] - last->kind_words[k];
                     if (i * 200 >= ti) fprintf(stderr, " %s %.0f%%x%.1f", kn[k], 100.0 * i / ti, (double)w / i);
                 }
                 fprintf(stderr, "\n");
@@ -926,7 +924,7 @@ static void print_stats(HvCpu *cpu, int force) {
         fprintf(stderr, "  light refills %.0fK/s, light branch-cache fills %.0fK/s, chained to other pages %.0f/s\n", RATE(refills) / 1e3,
                 RATE(ijc_light) / 1e3, RATE(xchained));
         fprintf(stderr, "  process switches: %.0f/s saved, %.0f/s restored, %.0f/s dropped by a TLBI (%.0f entries each)\n", RATE(stash_saves), RATE(stash_hits), RATE(stash_stale),
-                s->stash_hits - last.stash_hits ? (double)(s->stash_entries - last.stash_entries) / (s->stash_hits - last.stash_hits) : 0.0);
+                s->stash_hits - last->stash_hits ? (double)(s->stash_entries - last->stash_entries) / (s->stash_hits - last->stash_hits) : 0.0);
         fprintf(stderr, "  tlb misses K/s: el0 empty %.0f el0 conflict %.0f el1 empty %.0f el1 conflict %.0f\n",
                 RATE(tlb_miss_kind[0]) / 1e3, RATE(tlb_miss_kind[1]) / 1e3, RATE(tlb_miss_kind[2]) / 1e3, RATE(tlb_miss_kind[3]) / 1e3);
         fprintf(stderr, "  slow mem causes K/s: mmio %.0f code-page write %.0f page end %.0f tlb miss %.0f other %.0f entry-but-tag %.0f\n",
@@ -967,8 +965,8 @@ static void print_stats(HvCpu *cpu, int force) {
         reg_hist[bi] = 0;
     }
     memset(reg_hist, 0, sizeof reg_hist);
-    last = *s;
-    last_t = now;
+    *last = *s;
+    m->stats_last = now;
     hv_fp_enter(cpu);
 }
 
@@ -1197,7 +1195,7 @@ static int run_loop(HvCpu *cpu, int one) {
                         last_reason, why, (unsigned long long)cpu->miss_site, (unsigned long long)cpu->elr_el1,
                         (unsigned long long)cpu->spsr_el1, (unsigned long long)cpu->x[30], (unsigned long long)m->stats.fast_resumes);
                 for (int k = 0; k < 16; k++)
-                    fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->nrecent + k) & 15]);
+                    fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->dispatch.blocks + k) & 15]);
                 fprintf(stderr, "\n");
             }
         }
@@ -1300,7 +1298,9 @@ static int run_loop(HvCpu *cpu, int one) {
         prev_pc = cpu->pc;
         prev_b = b;
         if (m->stats_interval) m->stats.why[why]++;
-        p->recent[p->nrecent++ & 15] = cpu->pc | cpu->el;
+        uint64_t blocks = __atomic_load_n(&p->dispatch.blocks, __ATOMIC_RELAXED);
+        p->recent[blocks & 15] = cpu->pc | cpu->el;
+        __atomic_store_n(&p->dispatch.blocks, blocks + 1, __ATOMIC_RELAXED);
         if (why == 5 && m->stats_interval) {
             int kind = 6;
             /* A plain walk: fetching could raise an abort in the guest. */
@@ -1322,8 +1322,7 @@ static int run_loop(HvCpu *cpu, int one) {
         cpu->exit_reason = HV_EXIT_BRANCH;
         cpu->last_stub = 0;
         cpu->icount++;
-        m->stats.blocks++;
-        if (m->stats_interval && cpu->index == 0 && (m->stats.blocks & 0xffff) == 0) print_stats(cpu, 0);
+        if (m->stats_interval && cpu->index == 0 && (blocks & 0xffff) == 0) print_stats(cpu);
         if (m->gen_checks && ((uint64_t)(b->code - m->jit.base) >= hv_jit_extent(&m->jit) || b->jit_gen != __atomic_load_n(&m->jit_gen, __ATOMIC_SEQ_CST)))
             fprintf(stderr, "hengevm: cpu %u entering %p (rx+%llx, used %llx) for va %llx: block gen %u, now %u, maker %u\n", cpu->index, (void *)b->code, (unsigned long long)(b->code - m->jit.base) * 4, (unsigned long long)m->jit.used * 4, (unsigned long long)b->va, b->jit_gen, m->jit_gen, b->maker);
         hv_enter(cpu, b->code);

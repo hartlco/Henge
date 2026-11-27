@@ -43,11 +43,11 @@ void hv_pstate_set(HvCpu *cpu, uint64_t spsr) {
 }
 
 void hv_take_exception(HvCpu *cpu, int type, uint32_t esr, uint64_t far, int set_far, uint64_t ret) {
-    if (type == HV_EXC_SYNC) cpu->m->stats.exceptions++;
-    else cpu->m->stats.interrupts++;
+    HvPerCpu *p = &cpu->m->percpu[cpu->index];
+    uint64_t *count = type == HV_EXC_SYNC ? &p->dispatch.exceptions : &p->dispatch.interrupts;
+    __atomic_store_n(count, __atomic_load_n(count, __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED);
     uint64_t spsr = hv_pstate_get(cpu);
     {
-        HvPerCpu *p = &cpu->m->percpu[cpu->index];
         uint32_t k = p->nelchg++ & 15;
         p->elchg[k].from = ret, p->elchg[k].spsr = spsr, p->elchg[k].kind = (uint32_t)type, p->elchg[k].el = cpu->el;
         p->elchg[k].to = esr;

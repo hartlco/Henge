@@ -68,9 +68,14 @@ typedef struct HvBlock {
 #define HV_MAX_SLOTS (6 << 20)  /* chainable exits: about two per block */
 #define HV_FLUSH_EVICT 2        /* flush_pending: the code cache is full; taking back its oldest segment will do */
 
+typedef struct HvDispatchCounts {
+    uint64_t blocks, exceptions, interrupts;
+} HvDispatchCounts;
+
 /* Counters for --stats: where the time goes. */
 typedef struct HvStats {
-    uint64_t blocks, translations, block_flushes;
+    HvDispatchCounts dispatch;
+    uint64_t translations, block_flushes;
     uint64_t evictions, evict_ticks, evict_blocks, evict_unchained; /* code-cache segments taken back, host ticks it took, blocks dropped, chained exits undone */
     uint64_t evict_slot_only; /* surviving exits unchained by clearing the slot alone */
     uint64_t evict_phase[3];  /* of those ticks: caches, blocks and hash; the slots; the instruction-cache lines */
@@ -127,7 +132,7 @@ typedef struct HvStats {
     uint64_t translate_ticks, translated_insns, translated_words; /* time spent translating, guest and host code size */
     uint64_t retrans_va, retrans_vapa; /* translations of a VA (and VA+PA) translated before: diagnostics */
     uint64_t helper[12];      /* by HV_OP_* */
-    uint64_t tlb_flushes, fetch_walks, exceptions, interrupts;
+    uint64_t tlb_flushes, fetch_walks;
     uint64_t wfi, wfi_ticks;  /* WFI exits, host ticks spent asleep */
 } HvStats;
 
@@ -185,7 +190,7 @@ typedef struct HvPerCpu {
     uint64_t recent[16];      /* debugging: the last blocks the dispatcher entered (pc | el) */
     struct { uint64_t from, to, spsr; uint32_t kind, el; } elchg[16]; /* debugging: last exception entries (kind = type) and ERETs (kind 9) */
     uint32_t nelchg;
-    uint64_t nrecent;
+    HvDispatchCounts dispatch; /* single writer; blocks also indexes the recent history */
     /* Direct-mapped cache in front of the hash, with the VA beside the block so
        a slot holding another block is passed over without reading it. */
     struct { uint64_t va; struct HvBlock *b; } jc[1 << HV_JC_BITS];
@@ -261,7 +266,8 @@ typedef struct HvMachine {
     uint64_t access_pc;  /* guest PC of the load/store being emulated, for logs */
     uint64_t watch_va;   /* debugging: log every write that touches this guest VA (0: off) */
     uint64_t watch_pa;   /* debugging: the same by physical address */
-    HvStats stats;
+    HvStats stats, previous_stats;
+    uint64_t stats_start, stats_last;
     int chain;               /* block chaining and the indirect-branch cache are enabled */
     uint64_t *slots;         /* chainable exits' targets (0: not chained) */
     uint32_t *slot_site;     /* JIT word offset + 1 (0: NULL) of the B chaining rewrites */
@@ -333,6 +339,8 @@ static inline HvBlock *hv_block_find(HvMachine *m, uint32_t h, uint64_t va, uint
     return NULL;
 }
 
+/* Totals across virtual CPUs, including CPUs that have since been reset or powered off. */
+HvDispatchCounts hv_dispatch_counts(const HvMachine *m);
 int hv_machine_init(HvMachine *m, size_t jit_bytes);
 /* The same with JIT memory the host provides (iOS: the region a debugger granted and its writable alias). */
 int hv_machine_init_jit(HvMachine *m, void *rx, void *rw, size_t jit_bytes);

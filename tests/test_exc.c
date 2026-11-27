@@ -170,12 +170,14 @@ int main(void) {
     }
 
     static const TestProgram irq = TEST_PROGRAM(p_irq);
+    uint64_t irqs = hv_dispatch_counts(&m).interrupts;
     m.percpu[0].irq_line = 1;
     if (!run(&irq, &c, 0)) {
         check("irq", "masked IRQ not taken across WFI", c.x[1], 0);
         check("irq", "taken after DAIFClr", c.x[2], 1);
         check("irq", "vector", c.x[3], 0x280);
         check("irq", "ELR = next instruction", c.x[4], c.x[5]);
+        check("irq", "interrupt counted once", hv_dispatch_counts(&m).interrupts - irqs, 1);
         check("irq", "line acknowledged", m.percpu[0].irq_line, 0);
     }
     m.percpu[0].irq_line = 0;
@@ -216,18 +218,26 @@ int main(void) {
 
     /* A fault report must describe the CPU that took the exception. */
     static HvCpu second;
-    uint64_t recent0 = m.percpu[0].nrecent;
+    uint64_t recent0 = m.percpu[0].dispatch.blocks;
     uint32_t changes0 = m.percpu[0].nelchg;
+    HvDispatchCounts before = hv_dispatch_counts(&m);
     hv_cpu_reset_index(&second, &m, 1);
     second.pc = ADDR(p_svc);
     m.stop_pc = ADDR(p_svc_end);
     check("cpu history", "second CPU reached the stop PC", hv_run(&second), HV_EXIT_HALT);
-    check("cpu history", "first CPU's block history", m.percpu[0].nrecent, recent0);
+    check("cpu history", "first CPU's block history", m.percpu[0].dispatch.blocks, recent0);
     check("cpu history", "first CPU's exception history", m.percpu[0].nelchg, changes0);
-    check("cpu history", "second CPU recorded blocks", m.percpu[1].nrecent > 0, 1);
+    check("cpu history", "second CPU recorded blocks", m.percpu[1].dispatch.blocks > 0, 1);
     check("cpu history", "second CPU recorded SVC and ERET", m.percpu[1].nelchg, 2);
     check("cpu history", "SVC return address", m.percpu[1].elchg[0].from, second.x[6]);
     check("cpu history", "ERET destination", m.percpu[1].elchg[1].to, second.x[6]);
+
+    HvDispatchCounts after = hv_dispatch_counts(&m);
+    check("CPU totals", "dispatched on second CPU", after.blocks - before.blocks, m.percpu[1].dispatch.blocks);
+    check("CPU totals", "one synchronous exception", after.exceptions - before.exceptions, 1);
+    check("CPU totals", "no interrupts", after.interrupts, before.interrupts);
+    hv_cpu_reset_index(&second, &m, 1);
+    check("CPU totals", "CPU reset keeps dispatched blocks", hv_dispatch_counts(&m).blocks, after.blocks);
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
