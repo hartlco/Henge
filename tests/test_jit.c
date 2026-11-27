@@ -47,7 +47,7 @@ static int test_eviction_branch_range(void) {
         m.slot_site[i] = hv_slot_enc(&m, site);
         m.slot_stub[i] = hv_slot_enc(&m, site + 4);
         m.slot_cond[i] = hv_slot_enc(&m, hot);
-        hv_slot_tlist_insert(&m, 0, i, cases[i].direct_site || cases[i].direct_hot);
+        hv_slot_target_insert(&m, 0, i, cases[i].direct_site || cases[i].direct_hot);
         uint32_t branch = 0x14000004, hot_branch = cases[i].hot_op;
         if (cases[i].direct_site) bad |= !hv_branch_retarget(&branch, cases[i].target - cases[i].site);
         int to = cases[i].direct_hot ? cases[i].target : cases[i].site;
@@ -66,6 +66,35 @@ static int test_eviction_branch_range(void) {
     bad |= m.stats.evict_unchained != 4 || m.stats.evict_slot_only != 1;
     hv_machine_free(&m);
     printf("eviction at branch range limits: %s\n", bad ? "FAIL" : "ok");
+    return bad;
+}
+
+/* Move an exit between segments, evict its old target, then reuse the slots after a full flush. */
+static int test_incoming_slots(void) {
+    static HvMachine m;
+    if (hv_machine_init(&m, 1u << 20)) return 1;
+    hv_jit_ring(&m.jit, 64);
+    uint32_t last = m.max_slots - 1;
+    m.slots[0] = m.slots[63] = m.slots[64] = m.slots[last] = 1;
+    hv_slot_target_insert(&m, 0, 0, 0);
+    hv_slot_target_insert(&m, 0, 63, 0);
+    hv_slot_target_insert(&m, 0, 64, 0);
+    hv_slot_target_insert(&m, 63, last, 0);
+    hv_slot_target_remove(&m, 63);
+    hv_slot_target_insert(&m, 1, 63, 0);
+    hv_evict_blocks(&m);
+    int bad = m.stats.evict_unchained != 2 || m.slots[0] || m.slots[64] || !m.slots[63] || !m.slots[last];
+    hv_evict_blocks(&m);
+    bad |= m.stats.evict_unchained != 3 || m.slots[63] || !m.slots[last];
+    hv_flush_blocks(&m);
+    hv_jit_ring(&m.jit, 64);
+    m.slots[last] = 1;
+    hv_slot_target_insert(&m, 1, last, 0);
+    m.jit.end = (size_t)63 * m.jit.seg_words;
+    hv_evict_blocks(&m);
+    bad |= m.stats.evict_unchained != 3 || !m.slots[last];
+    hv_machine_free(&m);
+    printf("incoming slots across segments and full flush: %s\n", bad ? "FAIL" : "ok");
     return bad;
 }
 
@@ -135,7 +164,7 @@ int main(void) {
     uint64_t sp = (uint64_t)(uintptr_t)stack + 32768;
 
     m.trace = getenv("HV_TRACE") != NULL;
-    int failed = test_eviction_branch_range();
+    int failed = test_eviction_branch_range() + test_incoming_slots();
     size_t count = sizeof programs / sizeof programs[0];
     for (size_t i = 0; i < count; i++) {
         const TestProgram *p = &programs[i];

@@ -135,8 +135,8 @@ static int init_rest(HvMachine *m) {
     m->slot_xnext = calloc(m->max_slots, sizeof *m->slot_xnext);
     m->slot_xprev = calloc(m->max_slots, sizeof *m->slot_xprev);
     m->slot_tseg = calloc(m->max_slots, sizeof *m->slot_tseg);
-    m->slot_tprev = calloc(m->max_slots, sizeof *m->slot_tprev);
-    m->slot_tnext = calloc(m->max_slots, sizeof *m->slot_tnext);
+    m->incoming_stride = (uint32_t)(((size_t)m->max_slots + 63) / 64);
+    m->incoming_bits = calloc((size_t)m->incoming_stride * HV_JIT_MAX_SEGS, sizeof *m->incoming_bits);
     m->slot_free = calloc(m->max_slots, sizeof *m->slot_free);
     if (!m->slot_free) return -1;
     /* Reclaim 64 MiB at a time in the app's 1.5 GiB cache. Every guest CPU waits during an eviction. */
@@ -147,7 +147,7 @@ static int init_rest(HvMachine *m) {
        it all meant translating the whole working set again each time. */
     hv_jit_ring(&m->jit, hv_knob[HV_K_JITSEGS] ? (uint32_t)hv_knob[HV_K_JITSEGS] : 8);
     if (!m->slots || !m->slot_site || !m->slot_stub || !m->slot_cond || !m->slot_xa || !m->slot_xpa ||
-        !m->slot_xnext || !m->slot_xprev || !m->slot_tseg || !m->slot_tprev || !m->slot_tnext) return -1;
+        !m->slot_xnext || !m->slot_xprev || !m->slot_tseg || !m->incoming_bits) return -1;
     for (int i = 0; i < HV_MAX_CPUS; i++) { /* untouched pages cost nothing, so every CPU gets its tables now */
         HvPerCpu *p = &m->percpu[i];
         p->ijc = calloc(HV_IJC_TABLES * HV_IJC_TABLE_BYTES / 8, 8);
@@ -441,8 +441,7 @@ void hv_machine_free(HvMachine *m) {
     free(m->slot_xnext);
     free(m->slot_xprev);
     free(m->slot_tseg);
-    free(m->slot_tprev);
-    free(m->slot_tnext);
+    free(m->incoming_bits);
     free(m->slot_free);
     if (m->locks_initialized) {
         pthread_mutex_destroy(&m->big_mu);
@@ -556,7 +555,7 @@ void hv_invalidate_code(HvMachine *m, uint64_t pa) {
         m->slot_xnext[idx] = 0;
         m->slot_xprev[idx] = 0;
         m->slot_xpa[idx] = 0;
-        if (m->slot_tseg[idx]) hv_slot_tlist_unlink(m, idx);
+        if (m->slot_tseg[idx]) hv_slot_target_remove(m, idx);
         __atomic_store_n(&m->slots[idx], 0, __ATOMIC_RELEASE);
         uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
         if (site) {

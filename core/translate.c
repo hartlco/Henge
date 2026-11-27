@@ -433,8 +433,6 @@ static void put_branch_exit(Emit *e, uint64_t target, int plain) {
     e->m->slot_xnext[slot_index] = 0;
     e->m->slot_xprev[slot_index] = 0;
     e->m->slot_tseg[slot_index] = 0;
-    e->m->slot_tprev[slot_index] = 0;
-    e->m->slot_tnext[slot_index] = 0;
     uint32_t to_exit = ~0u;
     if (check) {
         put(e, 0xb9400000u | (HV_CPU_EXIT_REQ / 4) << 10 | 28 << 5 | 15); /* ldr w15, [x28, #exit_req] */
@@ -2386,7 +2384,7 @@ int hv_translate_commit_slots(HvMachine *m) {
         m->seg_slots[seg][m->seg_slots_len[seg]++] = idx;
         if (m->slots[idx]) {
             uint32_t tseg = hv_jit_seg_of(m, (const uint32_t *)(uintptr_t)m->slots[idx]);
-            hv_slot_tlist_insert(m, tseg, idx, e->site[k].patched);
+            hv_slot_target_insert(m, tseg, idx, e->site[k].patched);
         }
     }
     e->nsite = 0;

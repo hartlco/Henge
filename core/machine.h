@@ -273,11 +273,11 @@ typedef struct HvMachine {
        through slot_xnext/slot_xprev (slot + 1, 0 at the ends) for O(1) removal on eviction. */
     uint64_t *slot_xa, *slot_xpa;
     uint32_t *slot_xnext, *slot_xprev, nxchained;
-    /* Incoming chain list per target JIT segment (low bits: seg + 1 when chained, high bit: an instruction was patched)
-       and per-source-segment owned slot lists, so evicting one segment is O(segment). */
+    /* Incoming slots for each target segment, indexed by slot number. slot_tseg also records
+       whether chaining patched an instruction. seg_slots lists exits owned by each source segment. */
     uint8_t *slot_tseg;
-    uint32_t *slot_tprev, *slot_tnext;
-    uint32_t tseg_head[HV_JIT_MAX_SEGS];
+    uint64_t *incoming_bits;
+    uint32_t incoming_stride, incoming_used[HV_JIT_MAX_SEGS]; /* bitmap words per segment and used prefix */
     uint32_t *seg_slots[HV_JIT_MAX_SEGS];
     uint32_t seg_slots_len[HV_JIT_MAX_SEGS], seg_slots_cap[HV_JIT_MAX_SEGS];
     uint32_t slot_trash_head; /* lock-free singly linked list through slot_xnext for aborted/discarded translations */
@@ -363,26 +363,22 @@ static inline uint32_t *hv_slot_dec(const HvMachine *m, uint32_t enc) {
 enum { HV_SLOT_PATCHED = 0x80 };
 _Static_assert(HV_JIT_MAX_SEGS < HV_SLOT_PATCHED, "target segment must fit with the patch flag");
 
-static inline void hv_slot_tlist_insert(HvMachine *m, uint32_t tseg, uint32_t idx, int patched) {
-    uint32_t old_head = m->tseg_head[tseg];
-    m->slot_tnext[idx] = old_head;
-    m->slot_tprev[idx] = 0;
-    if (old_head) m->slot_tprev[old_head - 1] = idx + 1u;
-    m->tseg_head[tseg] = idx + 1u;
-    m->slot_tseg[idx] = (uint8_t)((tseg + 1u) | (patched ? HV_SLOT_PATCHED : 0));
+static inline uint64_t *hv_incoming_bits(HvMachine *m, uint32_t seg) {
+    return m->incoming_bits + (size_t)seg * m->incoming_stride;
 }
 
-static inline void hv_slot_tlist_unlink(HvMachine *m, uint32_t idx) {
-    uint8_t ts = m->slot_tseg[idx] & ~HV_SLOT_PATCHED;
-    if (!ts) return;
-    uint32_t tseg = (uint32_t)(ts - 1u);
-    uint32_t prev = m->slot_tprev[idx], next = m->slot_tnext[idx];
-    if (prev) m->slot_tnext[prev - 1] = next;
-    else if (m->tseg_head[tseg] == idx + 1u) m->tseg_head[tseg] = next;
-    if (next) m->slot_tprev[next - 1] = prev;
+static inline void hv_slot_target_insert(HvMachine *m, uint32_t seg, uint32_t idx, int patched) {
+    uint32_t word = idx >> 6;
+    hv_incoming_bits(m, seg)[word] |= UINT64_C(1) << (idx & 63);
+    if (word >= m->incoming_used[seg]) m->incoming_used[seg] = word + 1;
+    m->slot_tseg[idx] = (uint8_t)((seg + 1u) | (patched ? HV_SLOT_PATCHED : 0));
+}
+
+static inline void hv_slot_target_remove(HvMachine *m, uint32_t idx) {
+    uint8_t tag = m->slot_tseg[idx] & ~HV_SLOT_PATCHED;
+    if (!tag) return;
+    hv_incoming_bits(m, tag - 1u)[idx >> 6] &= ~(UINT64_C(1) << (idx & 63));
     m->slot_tseg[idx] = 0;
-    m->slot_tprev[idx] = 0;
-    m->slot_tnext[idx] = 0;
 }
 
 static inline void hv_slot_xlist_insert(HvMachine *m, HvRam *ram, uint64_t pg, uint32_t idx) {

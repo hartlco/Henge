@@ -53,8 +53,12 @@ void hv_flush_blocks(HvMachine *m) {
     m->nslot_free = m->slot_take = 0;
     m->nxchained = 0;
     m->slot_trash_head = 0;
-    memset(m->tseg_head, 0, sizeof m->tseg_head);
-    for (int i = 0; i < HV_JIT_MAX_SEGS; i++) m->seg_slots_len[i] = 0;
+    for (int i = 0; i < HV_JIT_MAX_SEGS; i++) {
+        if (m->incoming_used[i])
+            memset(hv_incoming_bits(m, i), 0, (size_t)m->incoming_used[i] * sizeof *m->incoming_bits);
+        m->incoming_used[i] = 0;
+        m->seg_slots_len[i] = 0;
+    }
     for (int i = 0; i < m->nram; i++) memset(m->ram[i].xhead, 0, m->ram[i].npages * sizeof *m->ram[i].xhead); /* slots restart from 0 */
     hv_jit_reset(&m->jit);
     m->jit.limit = hv_knob[HV_K_JITCAP] > 0 ? ((size_t)hv_knob[HV_K_JITCAP] << 20) / sizeof(uint32_t) : 0; /* MB of it to use (testing) */
@@ -139,7 +143,7 @@ void hv_evict_blocks(HvMachine *m) {
     uint32_t nss = m->seg_slots_len[seg];
     for (uint32_t i = 0; i < nss; i++) {
         uint32_t idx = ss[i];
-        if (m->slot_tseg[idx]) hv_slot_tlist_unlink(m, idx);
+        if (m->slot_tseg[idx]) hv_slot_target_remove(m, idx);
         if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
         m->slots[idx] = 0;
         m->slot_site[idx] = 0;
@@ -150,50 +154,54 @@ void hv_evict_blocks(HvMachine *m) {
     }
     m->seg_slots_len[seg] = 0;
     uint32_t unchained = 0, slot_only = 0;
-    for (uint32_t k = m->tseg_head[seg]; k;) {
-        uint32_t idx = k - 1u;
-        int patched = m->slot_tseg[idx] & HV_SLOT_PATCHED;
-        k = m->slot_tnext[idx];
-        m->slot_tnext[idx] = 0;
-        m->slot_tprev[idx] = 0;
-        m->slot_tseg[idx] = 0;
-        m->slots[idx] = 0;
-        if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
-        unchained++;
-        if (!patched) {
-            slot_only++;
-            continue;
-        }
-        size_t before = nwords;
-        uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
-        uint32_t *stub = hv_slot_dec(m, m->slot_stub[idx]);
-        if (site && stub) {
-            uint32_t insn = 0x14000000u | (uint32_t)((stub - site) & 0x3ffffff);
-            if (nwords + 2 > nwords_cap) {
-                size_t cap = nwords_cap ? nwords_cap * 2 : 65536;
-                uint32_t **w = realloc(words, cap * sizeof *w);
-                if (!w) abort();
-                words = w, nwords_cap = cap;
+    uint64_t *incoming = hv_incoming_bits(m, seg);
+    for (uint32_t w = 0; w < m->incoming_used[seg]; w++) {
+        uint64_t bits = incoming[w];
+        if (!bits) continue;
+        incoming[w] = 0;
+        while (bits) {
+            uint32_t idx = w * 64 + (uint32_t)__builtin_ctzll(bits);
+            bits &= bits - 1;
+            int patched = m->slot_tseg[idx] & HV_SLOT_PATCHED;
+            m->slot_tseg[idx] = 0;
+            m->slots[idx] = 0;
+            if (m->slot_xpa[idx]) hv_slot_xlist_unlink(m, idx);
+            unchained++;
+            if (!patched) {
+                slot_only++;
+                continue;
             }
-            /* A branch that could not reach its target still points to the stub. */
-            if (*site != insn) {
-                hv_jit_write(r, site, &insn, 4);
-                words[nwords++] = site;
-            }
-            uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
-            if (cond) {
-                uint32_t old = *cond, insn = old;
-                if (hv_branch_retarget(&insn, site - cond) && insn != old) {
-                    hv_jit_write(r, cond, &insn, 4);
-                    words[nwords++] = cond;
+            size_t before = nwords;
+            uint32_t *site = hv_slot_dec(m, m->slot_site[idx]);
+            uint32_t *stub = hv_slot_dec(m, m->slot_stub[idx]);
+            if (site && stub) {
+                uint32_t insn = 0x14000000u | (uint32_t)((stub - site) & 0x3ffffff);
+                if (nwords + 2 > nwords_cap) {
+                    size_t cap = nwords_cap ? nwords_cap * 2 : 65536;
+                    uint32_t **w = realloc(words, cap * sizeof *w);
+                    if (!w) abort();
+                    words = w, nwords_cap = cap;
+                }
+                /* A branch that could not reach its target still points to the stub. */
+                if (*site != insn) {
+                    hv_jit_write(r, site, &insn, 4);
+                    words[nwords++] = site;
+                }
+                uint32_t *cond = hv_slot_dec(m, m->slot_cond[idx]);
+                if (cond) {
+                    uint32_t old = *cond, insn = old;
+                    if (hv_branch_retarget(&insn, site - cond) && insn != old) {
+                        hv_jit_write(r, cond, &insn, 4);
+                        words[nwords++] = cond;
+                    }
                 }
             }
+            slot_only += nwords == before;
         }
-        slot_only += nwords == before;
     }
     m->stats.evict_unchained += unchained;
     m->stats.evict_slot_only += slot_only;
-    m->tseg_head[seg] = 0;
+    m->incoming_used[seg] = 0;
     m->nslot_free = nfree;
     m->slot_take = 0;
     uint64_t t2 = mach_absolute_time();
@@ -1011,7 +1019,7 @@ static void chain(HvMachine *m, uint64_t *slot, HvBlock *b) {
             patched = 1;
         }
     }
-    hv_slot_tlist_insert(m, tseg, idx, patched);
+    hv_slot_target_insert(m, tseg, idx, patched);
     m->stats.chained++;
     if (xa && m->stats_interval) m->stats.xchained++;
     pthread_mutex_unlock(&m->tr_mu);
