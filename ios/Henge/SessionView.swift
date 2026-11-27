@@ -156,7 +156,7 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
-        .sheet(isPresented: $showDetails) { details }
+        .sheet(isPresented: $showDetails) { details.onAppear(perform: refreshDetails) }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Shut Down", role: .destructive) { finish() }
         } message: {
@@ -471,6 +471,14 @@ struct SessionView: View {
         }
     }
 
+    private func refreshDetails() {
+        cpusOn = henge_vm_cpus_on()
+        framesOut = henge_vm_net_frames(1)
+        framesIn = henge_vm_net_frames(0)
+        helperRunning = Sharing.helperRunning
+        log = HengeLog.recentLines(30)
+    }
+
     private var details: some View {
         NavigationStack {
             List {
@@ -538,7 +546,7 @@ struct SessionView: View {
                 }
                 Section("Log") {
                     VStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(log.suffix(30).enumerated()), id: \.offset) { _, line in
+                        ForEach(Array(log.enumerated()), id: \.offset) { _, line in
                             Text(line).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                         }
                     }
@@ -642,16 +650,12 @@ struct SessionView: View {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 continue
             }
-            cpusOn = henge_vm_cpus_on()
             userCode = userCode || henge_vm_guest_el0() != 0
             let now = Date(), blocks = henge_vm_blocks()
             blocksPerSecond = Double(blocks &- lastBlocks) / max(now.timeIntervalSince(lastTime), 0.001)
             lastBlocks = blocks
             lastTime = now
-            framesOut = henge_vm_net_frames(1)
-            framesIn = henge_vm_net_frames(0)
-            helperRunning = Sharing.helperRunning
-            log = Array(HengeLog.recentLines(200))
+            if showDetails { refreshDetails() }
             let heat = ProcessInfo.processInfo.thermalState
             if heat.rawValue != thermalState.rawValue {
                 thermalState = heat
@@ -675,11 +679,12 @@ struct SessionView: View {
             tick += 1
             if tick % 10 == 0 {
                 let gpuFrames = henge_vm_gpu_frames()
+                let sent = henge_vm_net_frames(1), received = henge_vm_net_frames(0)
                 var sentBytes: UInt64 = 0, receivedBytes: UInt64 = 0
                 henge_vm_net_bytes(&sentBytes, &receivedBytes)
                 let cpuMilliseconds = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) / 1_000_000
                 HengeLog.log("perf", "blocks/s \(String(format: "%.0f", blocksPerSecond)), GPU frames/10s \(gpuFrames &- lastGPUFrames), "
-                             + "network tx \(framesOut), rx \(framesIn), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
+                             + "network tx \(sent), rx \(received), dns \(henge_vm_dns(0)) answered \(henge_vm_dns(2)) unanswered, "
                              + "thermal \(Self.thermalLabel(heat)), network bytes tx \(sentBytes), rx \(receivedBytes), process CPU ms \(cpuMilliseconds), "
                              + HengeLog.processPowerCounters())
                 lastGPUFrames = gpuFrames
