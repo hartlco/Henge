@@ -27,6 +27,7 @@ enum {
 };
 
 #define HV_MAX_BLOCK_INSNS 128
+_Static_assert(HV_MAX_BLOCK_INSNS <= UINT8_MAX, "block instruction count must fit in ninsns");
 
 /* Translates guest code starting at b->va (b->pa, b->flags filled in) into the
    machine's JIT region. `code` is the host copy of the guest instructions and

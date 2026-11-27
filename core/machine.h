@@ -41,17 +41,17 @@ typedef struct HvMmio {
 } HvMmio;
 
 typedef struct HvBlock {
-    uint32_t jit_gen; /* full flushes when it was made */
     uint64_t va, pa;
-    uint32_t flags;      /* HV_BLOCK_* state the translation depends on */
-    uint32_t ninsns;
-    uint32_t gen;        /* page_gen of its page when translated */
+    struct HvBlock *next;
+    uint32_t *code;
     struct HvRam *ram;   /* where its page lives, for a quick staleness check */
     uint64_t pg;
-    uint32_t *code;
-    struct HvBlock *next;
-    uint32_t maker;      /* the CPU that translated it (index + 1; 0: not a CPU, as in tests) */
+    uint32_t gen;        /* page_gen of its page when translated */
+    uint32_t jit_gen;    /* full flushes when it was made */
     uint32_t hash_prev;  /* previous block index + 1 in this bucket, or 0 at the head */
+    uint16_t flags;      /* HV_BLOCK_* state the translation depends on */
+    uint8_t ninsns;
+    uint8_t maker;       /* the CPU that translated it (index + 1; 0: not a CPU, as in tests) */
 } HvBlock;
 
 #define HV_BLOCK_EL1   1u        /* translated for EL1 (selects tlb[1]) */
@@ -136,6 +136,7 @@ typedef struct HvStats {
 } HvStats;
 
 #define HV_MAX_CPUS 8
+_Static_assert(HV_MAX_CPUS <= UINT8_MAX, "block maker must hold every CPU index plus one");
 #define HV_WHINT_MANY (1ull << 63) /* whint: more than three; else up to three TLB codes + 1, 16 bits each */
 
 /* What each CPU has to itself and keeps across hv_cpu_reset (tests copy HvCpu
