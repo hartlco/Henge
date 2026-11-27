@@ -633,6 +633,7 @@ void hv_debug_el0_in_kernel(HvCpu *cpu, const char *what) {
     {
         {
             HvMachine *m = cpu->m;
+            HvPerCpu *p = &m->percpu[cpu->index];
             uint32_t *host = (uint32_t *)(uintptr_t)cpu->helper_ret; /* the block's blr into hv_helper_entry */
             HvBlock *b = hv_block_at(m, host);
             int lo = b ? (int)(b - m->blocks) : 0;
@@ -640,17 +641,17 @@ void hv_debug_el0_in_kernel(HvCpu *cpu, const char *what) {
                             "miss site %llx\n  recent:", b ? (unsigned long long)b->va : 0ull, b ? b->flags : 0, lo, m->nblocks,
                     (unsigned long long)m->stats.block_flushes, (unsigned long long)cpu->last_stub,
                     (unsigned long long)cpu->miss_site);
-            for (int k = 15; k >= 0; k--) fprintf(stderr, " %llx", (unsigned long long)m->stats.recent[(m->stats.nrecent - 1 - k) & 15]);
-            fprintf(stderr, "\n  (%s) el changes, oldest first:\n", what);
+            for (int k = 15; k >= 0; k--) fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->nrecent - 1 - k) & 15]);
+            fprintf(stderr, "\n  (%s) cpu %u el changes, oldest first:\n", what, cpu->index);
             for (int k = 15; k >= 0; k--) {
-                uint32_t i = (m->stats.nelchg - 1 - k) & 15;
-                if (m->stats.elchg[i].kind == 9)
-                    fprintf(stderr, "    eret at %llx from el%u to %llx spsr %llx\n", (unsigned long long)m->stats.elchg[i].from,
-                            m->stats.elchg[i].el, (unsigned long long)m->stats.elchg[i].to, (unsigned long long)m->stats.elchg[i].spsr);
+                uint32_t i = (p->nelchg - 1 - k) & 15;
+                if (p->elchg[i].kind == 9)
+                    fprintf(stderr, "    eret at %llx from el%u to %llx spsr %llx\n", (unsigned long long)p->elchg[i].from,
+                            p->elchg[i].el, (unsigned long long)p->elchg[i].to, (unsigned long long)p->elchg[i].spsr);
                 else
-                    fprintf(stderr, "    exception type %u esr %llx from el%u pc %llx (spsr %llx)\n", m->stats.elchg[i].kind,
-                            (unsigned long long)m->stats.elchg[i].to, m->stats.elchg[i].el,
-                            (unsigned long long)m->stats.elchg[i].from, (unsigned long long)m->stats.elchg[i].spsr);
+                    fprintf(stderr, "    exception type %u esr %llx from el%u pc %llx (spsr %llx)\n", p->elchg[i].kind,
+                            (unsigned long long)p->elchg[i].to, p->elchg[i].el,
+                            (unsigned long long)p->elchg[i].from, (unsigned long long)p->elchg[i].spsr);
             }
         }
     }
@@ -1134,6 +1135,7 @@ static int host_pointer_check(HvCpu *cpu, uint64_t prev_pc) {
 
 static int run_loop(HvCpu *cpu, int one) {
     HvMachine *m = cpu->m;
+    HvPerCpu *p = &m->percpu[cpu->index];
     uint32_t since_tick = 0;
     uint64_t next_due = 0; /* host time of this CPU's next timer event, from its last tick (0: none armed) */
     uint64_t last_fault = ~0ull, prev_pc = 0;
@@ -1195,7 +1197,7 @@ static int run_loop(HvCpu *cpu, int one) {
                         last_reason, why, (unsigned long long)cpu->miss_site, (unsigned long long)cpu->elr_el1,
                         (unsigned long long)cpu->spsr_el1, (unsigned long long)cpu->x[30], (unsigned long long)m->stats.fast_resumes);
                 for (int k = 0; k < 16; k++)
-                    fprintf(stderr, " %llx", (unsigned long long)m->stats.recent[(m->stats.nrecent + k) & 15]);
+                    fprintf(stderr, " %llx", (unsigned long long)p->recent[(p->nrecent + k) & 15]);
                 fprintf(stderr, "\n");
             }
         }
@@ -1298,7 +1300,7 @@ static int run_loop(HvCpu *cpu, int one) {
         prev_pc = cpu->pc;
         prev_b = b;
         if (m->stats_interval) m->stats.why[why]++;
-        m->stats.recent[m->stats.nrecent++ & 15] = cpu->pc | cpu->el;
+        p->recent[p->nrecent++ & 15] = cpu->pc | cpu->el;
         if (why == 5 && m->stats_interval) {
             int kind = 6;
             /* A plain walk: fetching could raise an abort in the guest. */

@@ -214,6 +214,21 @@ int main(void) {
         if (!run(&copy, &c, 0)) check(p->name, "1 then 2 after patching", c.x[1], 3);
     }
 
+    /* A fault report must describe the CPU that took the exception. */
+    static HvCpu second;
+    uint64_t recent0 = m.percpu[0].nrecent;
+    uint32_t changes0 = m.percpu[0].nelchg;
+    hv_cpu_reset_index(&second, &m, 1);
+    second.pc = ADDR(p_svc);
+    m.stop_pc = ADDR(p_svc_end);
+    check("cpu history", "second CPU reached the stop PC", hv_run(&second), HV_EXIT_HALT);
+    check("cpu history", "first CPU's block history", m.percpu[0].nrecent, recent0);
+    check("cpu history", "first CPU's exception history", m.percpu[0].nelchg, changes0);
+    check("cpu history", "second CPU recorded blocks", m.percpu[1].nrecent > 0, 1);
+    check("cpu history", "second CPU recorded SVC and ERET", m.percpu[1].nelchg, 2);
+    check("cpu history", "SVC return address", m.percpu[1].elchg[0].from, second.x[6]);
+    check("cpu history", "ERET destination", m.percpu[1].elchg[1].to, second.x[6]);
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

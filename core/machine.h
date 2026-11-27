@@ -124,10 +124,6 @@ typedef struct HvStats {
     uint64_t reset_why[8];    /* cache drops: full flush, TLBI by ASID, TLBI user VA, TLBI kernel VA, code change, user VA in every ASID (whole user half), keyed filter full, big user range */
     uint64_t why[6];          /* dispatcher entries by cause: chain fill, kick, exception/sysreg, interrupt, cached target, cache miss */
     uint64_t miss_kind[7];    /* cache misses by the branch that missed: RET, BR/BLR, B/BL, conditional, MSR, other, unknown */
-    uint64_t recent[16];      /* debugging: the last blocks the dispatcher entered (pc | el) */
-    struct { uint64_t from, to, spsr; uint32_t kind, el; } elchg[16]; /* debugging: last exception entries (kind = type) and ERETs (kind 9) */
-    uint32_t nelchg;
-    uint64_t nrecent;
     uint64_t translate_ticks, translated_insns, translated_words; /* time spent translating, guest and host code size */
     uint64_t retrans_va, retrans_vapa; /* translations of a VA (and VA+PA) translated before: diagnostics */
     uint64_t helper[12];      /* by HV_OP_* */
@@ -186,6 +182,10 @@ typedef struct HvPerCpu {
        all 4096. A slot two keys wanted is spoiled (key ~0: scan it all); only
        this CPU empties one again, after clearing its page. */
     struct { uint64_t key, bits; } ijc_hint[2][4096];   /* page ^ salt of the last fill in each half: its filter bits are set already */
+    uint64_t recent[16];      /* debugging: the last blocks the dispatcher entered (pc | el) */
+    struct { uint64_t from, to, spsr; uint32_t kind, el; } elchg[16]; /* debugging: last exception entries (kind = type) and ERETs (kind 9) */
+    uint32_t nelchg;
+    uint64_t nrecent;
     /* Direct-mapped cache in front of the hash, with the VA beside the block so
        a slot holding another block is passed over without reading it. */
     struct { uint64_t va; struct HvBlock *b; } jc[1 << HV_JC_BITS];

@@ -47,10 +47,10 @@ void hv_take_exception(HvCpu *cpu, int type, uint32_t esr, uint64_t far, int set
     else cpu->m->stats.interrupts++;
     uint64_t spsr = hv_pstate_get(cpu);
     {
-        HvStats *st = &cpu->m->stats;
-        uint32_t k = st->nelchg++ & 15;
-        st->elchg[k].from = ret, st->elchg[k].spsr = spsr, st->elchg[k].kind = (uint32_t)type, st->elchg[k].el = cpu->el;
-        st->elchg[k].to = esr;
+        HvPerCpu *p = &cpu->m->percpu[cpu->index];
+        uint32_t k = p->nelchg++ & 15;
+        p->elchg[k].from = ret, p->elchg[k].spsr = spsr, p->elchg[k].kind = (uint32_t)type, p->elchg[k].el = cpu->el;
+        p->elchg[k].to = esr;
     }
     if (cpu->m->trace || cpu->m->log >= 2)
         fprintf(stderr, "exception type %d esr %08x far %llx from pc %llx el%u\n", type, esr, (unsigned long long)far,
@@ -112,10 +112,10 @@ void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, in
 
 void hv_eret(HvCpu *cpu) {
     if (cpu->m) {
-        HvStats *st = &cpu->m->stats;
-        uint32_t k = st->nelchg++ & 15;
-        st->elchg[k].from = cpu->pc, st->elchg[k].to = cpu->elr_el1, st->elchg[k].spsr = cpu->spsr_el1;
-        st->elchg[k].kind = 9, st->elchg[k].el = cpu->el;
+        HvPerCpu *p = &cpu->m->percpu[cpu->index];
+        uint32_t k = p->nelchg++ & 15;
+        p->elchg[k].from = cpu->pc, p->elchg[k].to = cpu->elr_el1, p->elchg[k].spsr = cpu->spsr_el1;
+        p->elchg[k].kind = 9, p->elchg[k].el = cpu->el;
     }
     cpu->pc = cpu->elr_el1;
     hv_pstate_set(cpu, cpu->spsr_el1);
