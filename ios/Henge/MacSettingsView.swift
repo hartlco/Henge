@@ -62,6 +62,24 @@ struct MacSettingsView: View {
                     }
                     Text("Turn this off to save power when you don’t need sound. Changes take effect after you shut down macOS and start it again.")
                         .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                    if let tool = Bundle.main.url(forResource: "guest-audio-routing", withExtension: "sh") {
+                        DisclosureGroup("Keep sound on in Sequoia") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Automatic Bluetooth audio switching can keep Sequoia busy while idle. This experimental tool turns it off inside the virtual Mac. Leave Mac audio output on.")
+                                ShareLink(item: tool) {
+                                    Label("Export audio tool", systemImage: "square.and.arrow.up")
+                                }
+                                Text("Choose Save to Files and save the tool in Henge’s Shared folder. With file sharing set up, run this in the Mac’s Terminal and restart macOS.")
+                                Text("sudo /bin/sh ~/Henge/guest-audio-routing.sh apply")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Text("To undo, run the same command with restore in place of apply and restart.")
+                            }
+                            .padding(.top, 8)
+                            .font(.footnote)
+                        }
+                        .font(.system(size: 15))
+                    }
                 }
                 .padding(17)
                 .deskCard()
