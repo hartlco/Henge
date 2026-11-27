@@ -296,6 +296,16 @@ static uint64_t find_slot(uint16_t vendor, uint16_t device, int nth) {
     return ~0ull;
 }
 
+static void setup_queue(uint64_t bar, uint64_t qr, unsigned q) {
+    memset(ram(qr), 0, 0x4000);
+    wr16(bar + 0x16, (uint16_t)q);
+    wr16(bar + 0x18, 16);
+    wr64(bar + 0x20, qr);
+    wr64(bar + 0x28, qr + 0x1000);
+    wr64(bar + 0x30, qr + 0x2000);
+    wr16(bar + 0x1c, 1);
+}
+
 static uint64_t setup_virtio_features(int slot, uint64_t bar, uint64_t ring, uint32_t low) {
     uint64_t cfg = VMAPPLE_PCIE_ECAM + ((uint64_t)slot << 15);
     wr32(cfg + 0x20, 0xffffffff);
@@ -321,16 +331,7 @@ static uint64_t setup_virtio_features(int slot, uint64_t bar, uint64_t ring, uin
     wr32(bar + 0x0c, 1);
     wr8(bar + 0x14, 1 | 2 | 8);
     check("FEATURES_OK", rd8(bar + 0x14) & 8, 8);
-    for (int q = 0; q < 2; q++) {
-        uint64_t qr = ring + (uint64_t)q * 0x4000;
-        memset(ram(qr), 0, 0x4000);
-        wr16(bar + 0x16, (uint16_t)q);
-        wr16(bar + 0x18, 16);
-        wr64(bar + 0x20, qr);
-        wr64(bar + 0x28, qr + 0x1000);
-        wr64(bar + 0x30, qr + 0x2000);
-        wr16(bar + 0x1c, 1);
-    }
+    for (int q = 0; q < 2; q++) setup_queue(bar, ring + (uint64_t)q * 0x4000, q);
     wr8(bar + 0x14, 1 | 2 | 8 | 4);
     return ring;
 }
@@ -355,6 +356,56 @@ static void offer(uint64_t ring, uint16_t head) {
 
 static uint16_t used_idx(uint64_t ring) {
     return ((uint16_t *)ram(ring + 0x2000))[1];
+}
+
+static void test_sound_wakes(void) {
+    HvVirtioSnd *d = board.snd;
+    if (!d) return;
+    uint64_t bar = VMAPPLE_PCIE_MMIO + 0x500000, ring = VMAPPLE_MEM + 0x1400000;
+    setup_virtio(d->vio.pci.slot, bar, ring);
+    ring += 0x8000;
+    setup_queue(bar, ring, 2); /* transmit queue */
+    uint64_t data = ring + 0x4000, status = data + HV_VSND_RING + 0x4000;
+    uint32_t first = HV_VSND_RING - 4096;
+    put_desc(ring, 0, data, first + 4, 1, 1);
+    put_desc(ring, 1, status, 8, 2, 0);
+    put_desc(ring, 2, data + HV_VSND_RING, 8192 + 4, 1, 3);
+    put_desc(ring, 3, status + 8, 8, 2, 0);
+    offer(ring, 0);
+    offer(ring, 2);
+    wr16(bar + 0x3008, 2);
+    check("only first sound buffer fits", d->xfers, 1);
+
+    int interval = m.stats_interval;
+    m.stats_interval = 1;
+    uint64_t wakes = m.stats.kick_src[3];
+    static uint8_t out[HV_VSND_RING];
+    check("partial audio pull", hv_virtio_snd_pull(d, out, 2048), 2048);
+    check("early pull lets CPU sleep", m.stats.kick_src[3], wakes);
+    hv_virtio_snd_pull(d, out, 2048);
+    check("enough room for waiting audio wakes CPU", m.stats.kick_src[3], wakes + 1);
+    hv_virtio_snd_poll(d);
+    check("second sound buffer copied", d->xfers, 2);
+    check("refill returns no buffer early", used_idx(ring), 0);
+    hv_virtio_snd_pull(d, out, first - 4097);
+    check("one byte before completion lets CPU sleep", m.stats.kick_src[3], wakes + 1);
+    hv_virtio_snd_pull(d, out, 1);
+    hv_virtio_snd_poll(d);
+    check("completed first sound buffer", used_idx(ring), 1);
+    check("completion woke CPU", m.stats.kick_src[3], wakes + 2);
+    hv_virtio_snd_pull(d, out, 8192);
+    hv_virtio_snd_poll(d);
+    check("completed second sound buffer", used_idx(ring), 2);
+    check("empty pull", hv_virtio_snd_pull(d, out, 8), 0);
+    check("empty pull lets CPU sleep", m.stats.kick_src[3], wakes + 3);
+    put_desc(ring, 4, data, 4, 1, 5); /* stream header with no PCM */
+    put_desc(ring, 5, status + 16, 8, 2, 0);
+    offer(ring, 4);
+    wr16(bar + 0x3008, 2);
+    check("empty sound buffer needs no further render", m.stats.kick_src[3], wakes + 4);
+    hv_virtio_snd_poll(d);
+    check("empty sound buffer returned", used_idx(ring), 3);
+    m.stats_interval = interval;
 }
 
 static void test_virtio_blk(HvDisk *aux) {
@@ -925,6 +976,7 @@ int main(void) {
     test_gic_routing();
     test_gpu_task_pages();
     test_scroll_pair();
+    test_sound_wakes();
 
     hv_disk_close(&root);
     hv_disk_close(&aux);

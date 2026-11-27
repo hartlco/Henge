@@ -175,9 +175,10 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
 /* ---- transmit ---- */
 
 /* Copy waiting buffers' audio into the ring while there is room. Their data is
-   still in guest memory, so copying can wait. */
+   still in guest memory, so copying can wait. Return how many bytes must have
+   been consumed to fit the next buffer, or UINT64_MAX when all are copied. */
 
-static void fill_ring(HvVirtioSnd *d) {
+static uint64_t fill_ring(HvVirtioSnd *d) {
     HvVirtio *v = &d->vio;
     while (d->pcopy != d->ptail) {
         HvVirtqElem *e = &d->pending[d->pcopy % HV_VSND_PENDING];
@@ -185,7 +186,7 @@ static void fill_ring(HvVirtioSnd *d) {
         len = len > 4 ? len - 4 : 0;
         uint64_t w = atomic_load(&d->written);
         if (len > HV_VSND_RING) len = HV_VSND_RING;
-        if (w + len - atomic_load(&d->consumed) > HV_VSND_RING) return; /* full: later */
+        if (w + len - atomic_load(&d->consumed) > HV_VSND_RING) return w + len - HV_VSND_RING;
         uint32_t off = 0;
         while (off < len) {
             uint32_t at = (uint32_t)((w + off) % HV_VSND_RING), n = len - off;
@@ -198,16 +199,29 @@ static void fill_ring(HvVirtioSnd *d) {
         d->pcopy++;
         d->xfers++;
     }
+    return UINT64_MAX;
 }
 
-static void take_tx(HvVirtioSnd *d) {
+static uint64_t take_tx(HvVirtioSnd *d) {
     HvVirtio *v = &d->vio;
-    if (!(v->status & 4) || !v->q[TXQ].enabled) return;
+    if (!(v->status & 4) || !v->q[TXQ].enabled) return UINT64_MAX;
     while (d->ptail - d->phead < HV_VSND_PENDING) {
         if (hv_virtq_pop(v, TXQ, &d->pending[d->ptail % HV_VSND_PENDING]) <= 0) break;
         d->ptail++;
     }
-    fill_ring(d);
+    return fill_ring(d);
+}
+
+static void arm_wake(HvVirtioSnd *d, uint64_t next, uint64_t consumed) {
+    if (d->phead != d->pcopy && d->pending_end[d->phead % HV_VSND_PENDING] < next)
+        next = d->pending_end[d->phead % HV_VSND_PENDING];
+    if (atomic_load_explicit(&d->wake_at, memory_order_relaxed) != next) {
+        /* A render may cross the new position while we're publishing it. Either
+           the render sees it or this check sees the render's consumption. */
+        atomic_store(&d->wake_at, next);
+        consumed = atomic_load(&d->consumed);
+    }
+    if (consumed >= next) hv_machine_wake(d->vio.m);
 }
 
 void hv_virtio_snd_poll(HvVirtioSnd *d) {
@@ -226,7 +240,7 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
         }
         if (target > atomic_load(&d->consumed)) atomic_store(&d->consumed, target);
     }
-    take_tx(d);
+    uint64_t refill_at = take_tx(d);
     uint64_t c = atomic_load_explicit(&d->consumed, memory_order_acquire);
     int any = 0;
     while (d->phead != d->pcopy && d->pending_end[d->phead % HV_VSND_PENDING] <= c) {
@@ -242,8 +256,9 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
     }
     if (any) {
         hv_virtio_interrupt(v);
-        take_tx(d); /* room for more */
+        refill_at = take_tx(d); /* room for more */
     }
+    arm_wake(d, refill_at, c);
 }
 
 uint32_t hv_virtio_snd_pull(HvVirtioSnd *d, void *buf, uint32_t len) {
@@ -262,8 +277,8 @@ uint32_t hv_virtio_snd_pull(HvVirtioSnd *d, void *buf, uint32_t len) {
         if (d->running) d->underruns++;
     }
     /* compare-exchange: a release on the CPU thread may have moved it on */
-    atomic_compare_exchange_strong(&d->consumed, &c, c + n);
-    if (n) hv_machine_wake(d->vio.m);
+    if (n && atomic_compare_exchange_strong(&d->consumed, &c, c + n) && c + n >= atomic_load(&d->wake_at))
+        hv_machine_wake(d->vio.m);
     return n;
 }
 
@@ -279,7 +294,8 @@ static void notify(HvVirtio *v, int q) {
         if (any) hv_virtio_interrupt(v);
         hv_virtio_snd_poll(d); /* a release may have freed buffers */
     } else if (q == TXQ) {
-        take_tx(d);
+        uint64_t refill_at = take_tx(d);
+        arm_wake(d, refill_at, atomic_load(&d->consumed));
     } else if (q == RXQ) { /* no input stream: hand capture buffers straight back */
         int any = 0;
         while (hv_virtq_pop(v, q, &e) > 0) {
@@ -305,6 +321,7 @@ HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus) {
     memcpy(v->config + 8, &chmaps, 4);
     v->config_len = 12;
     d->ring = calloc(1, HV_VSND_RING);
+    atomic_init(&d->wake_at, UINT64_MAX);
     hv_pcie_attach(bus, &v->pci);
     return d;
 }
@@ -313,6 +330,7 @@ HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus) {
    without one starts from now (host times from before mean nothing). */
 void hv_virtio_snd_resume(HvVirtioSnd *d) {
     if (!d) return;
+    atomic_store(&d->wake_at, 0); /* the first pull can wake the CPU before its first poll */
     d->clock_start_ns = now_ns();
     d->clock_start_consumed = atomic_load(&d->consumed);
     if (d->running && d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
