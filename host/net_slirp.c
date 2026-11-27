@@ -9,6 +9,7 @@
    virtio-net device on the CPU thread (hv_net_poll), which may only take them
    when the guest has posted receive buffers. */
 #include "net_slirp.h"
+#include "net_wait.h"
 #include "dns_proxy.h"
 #include "share.h"
 
@@ -29,7 +30,6 @@
 #define QUEUE 512
 #define MAX_FRAME 65550
 #define MAX_TIMERS 64
-#define MAX_POLL 1024
 
 typedef struct Frame {
     uint32_t len;
@@ -59,8 +59,9 @@ static pthread_t network_thread;
 static int thread_started, queues_initialized;
 static _Atomic int stopping;
 static Timer timers[MAX_TIMERS];
-static struct pollfd pfds[MAX_POLL];
+static struct pollfd pfds[HV_NET_MAX_POLL];
 static int npfd;
+static HvNetWaitStats wait_stats;
 uint64_t hv_net_tx_frames, hv_net_rx_frames;
 
 static char share_socket[256];
@@ -166,6 +167,7 @@ static void timer_mod(void *timer, int64_t expire_ms, void *opaque) {
 
 static void register_poll_socket(slirp_os_socket fd, void *opaque) {
     (void)opaque;
+    hv_net_wait_reset(); /* a new socket can reuse an old descriptor number */
     int buf = 1 << 20;
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
@@ -173,6 +175,7 @@ static void register_poll_socket(slirp_os_socket fd, void *opaque) {
 
 static void unregister_poll_socket(slirp_os_socket fd, void *opaque) {
     (void)fd, (void)opaque;
+    hv_net_wait_reset();
 }
 
 static void notify(void *opaque) {
@@ -191,7 +194,7 @@ static void enqueue_to_host(const uint8_t *frame, uint32_t len) {
 
 static int add_poll(slirp_os_socket fd, int events, void *opaque) {
     (void)opaque;
-    if (npfd == MAX_POLL) return -1;
+    if (npfd == HV_NET_MAX_POLL) return -1;
     short ev = 0;
     if (events & SLIRP_POLL_IN) ev |= POLLIN;
     if (events & SLIRP_POLL_OUT) ev |= POLLOUT;
@@ -240,7 +243,7 @@ static void *net_thread(void *unused) {
         npfd = 0;
         pfds[npfd++] = (struct pollfd){wake_pipe[0], POLLIN, 0};
         slirp_pollfds_fill_socket(slirp, &timeout, add_poll, NULL);
-        int r = poll(pfds, (nfds_t)npfd, (int)timeout);
+        int r = hv_net_wait(pfds, npfd, (int)timeout, &wait_stats);
         if (pfds[0].revents & POLLIN) {
             char buf[64];
             /* A short read drains the pending wakes. A later write wakes poll again. */
@@ -326,6 +329,7 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
     atomic_store(&stopping, 0);
     hv_dns_proxy_start();
     hv_net_tx_frames = hv_net_rx_frames = 0;
+    wait_stats = (HvNetWaitStats){0};
     rx_wake_pending = 0;
     pthread_mutex_init(&to_guest.mu, NULL);
     pthread_mutex_init(&to_host.mu, NULL);
@@ -380,11 +384,14 @@ void hv_net_detach(void) {
     if (net) {
         net->transmit = NULL;
         if (machine->stats_interval && net->rx_frames)
-            fprintf(stderr, "hengevm: network delivered %llu Ethernet frames in %llu guest receive buffers\n",
-                    (unsigned long long)net->rx_frames, (unsigned long long)net->rx_buffers);
+            fprintf(stderr, "hengevm: network delivered %llu Ethernet frames in %llu guest receive buffers, "
+                    "peak %d host sockets, reused subscriptions for %llu of %llu waits\n",
+                    (unsigned long long)net->rx_frames, (unsigned long long)net->rx_buffers, wait_stats.peak_sockets,
+                    (unsigned long long)wait_stats.reused, (unsigned long long)wait_stats.waits);
     }
     if (slirp) slirp_cleanup(slirp);
     slirp = NULL;
+    hv_net_wait_reset();
     if (queues_initialized) {
         Queue *queues[] = {&to_guest, &to_host};
         for (int i = 0; i < 2; i++) {
