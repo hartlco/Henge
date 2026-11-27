@@ -171,6 +171,16 @@ int main(void) {
         check("a failed resume uses the file up too", access(snap, F_OK) != 0);
         /* Save again (the failed resume took the file), then resume it properly. */
         rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
+        /* Two sparse chunks, one compressible and one filled with incompressible data. */
+        enum { page = 0x4000, span = 5 * page };
+        uint8_t *pattern = calloc(2, span);
+        if (!pattern) exit(1);
+        memset(pattern + page, 0x41, 2 * page);
+        memset(pattern + 4 * page, 0x73, page);
+        arc4random_buf(pattern + span + page, 2 * page);
+        arc4random_buf(pattern + span + 4 * page, page);
+        memcpy(hv_vm_board()->ram + (8u << 20), pattern, span);
+        memcpy(hv_vm_board()->ram + (12u << 20), pattern + span, span);
         usleep(30000);
         rc |= henge_vm_suspend(snap, "test", error, sizeof error);
         c2 = *(volatile uint64_t *)hv_vm_board()->ram;
@@ -178,6 +188,10 @@ int main(void) {
         rc |= henge_vm_resume(rom, disk, aux, 1, 0, 64, 2, snap, "test", error, sizeof error);
         if (rc) fprintf(stderr, "resume: %s\n", error);
         check("resume starts the saved Mac", rc == 0 && henge_vm_state() == 1);
+        check("resume restores sparse pages and their gaps",
+              !memcmp(hv_vm_board()->ram + (8u << 20), pattern, span) &&
+              !memcmp(hv_vm_board()->ram + (12u << 20), pattern + span, span));
+        free(pattern);
         check("the file is used once", access(snap, F_OK) != 0);
         count = (volatile uint64_t *)hv_vm_board()->ram;
         check("resumed: the counter is where it was", *count >= c2);

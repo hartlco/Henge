@@ -254,15 +254,16 @@ typedef struct Slot {
     void *scratch;
 } Slot;
 
-static int slots_alloc(Slot *s, int n) {
-    size_t scratch = compression_encode_scratch_buffer_size(COMPRESSION_LZ4);
-    size_t dscratch = compression_decode_scratch_buffer_size(COMPRESSION_LZ4);
-    if (dscratch > scratch) scratch = dscratch;
+static int slots_alloc(Slot *s, int n, int packing) {
+    size_t scratch = packing ? compression_encode_scratch_buffer_size(COMPRESSION_LZ4) : 0;
     for (int i = 0; i < n; i++) {
-        s[i].stage = malloc(CHUNK_BYTES);
         s[i].out = malloc(CHUNK_BYTES);
-        s[i].scratch = malloc(scratch ? scratch : 1);
-        if (!s[i].stage || !s[i].out || !s[i].scratch) return -1;
+        if (!s[i].out) return -1;
+        if (packing) {
+            s[i].stage = malloc(CHUNK_BYTES);
+            s[i].scratch = malloc(scratch ? scratch : 1);
+            if (!s[i].stage || !s[i].scratch) return -1;
+        }
     }
     return 0;
 }
@@ -320,7 +321,7 @@ static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     w_raw(w, &rh, sizeof rh);
     Slot set[2][BATCH];
     memset(set, 0, sizeof set);
-    if (slots_alloc(set[0], BATCH) || slots_alloc(set[1], BATCH)) {
+    if (slots_alloc(set[0], BATCH, 1) || slots_alloc(set[1], BATCH, 1)) {
         slots_free(set[0], BATCH), slots_free(set[1], BATCH);
         return w->err = ENOMEM, -1;
     }
@@ -388,20 +389,55 @@ static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     return w->err ? -1 : 0;
 }
 
+/* Decode straight into runs of saved guest pages. A hole keeps its existing contents. */
 static int chunk_unpack(Slot *s, uint8_t *base, uint64_t size) {
     uint64_t from = (uint64_t)s->h.index * CHUNK_BYTES;
     if (from >= size) return -1;
     uint32_t pages = (uint32_t)((size - from < CHUNK_BYTES ? size - from : CHUNK_BYTES) / PAGE);
     size_t raw = (size_t)s->h.stored * PAGE;
-    const uint8_t *src = s->out;
-    if (!s->h.raw) {
-        if (compression_decode_buffer(s->stage, CHUNK_BYTES, s->out, s->h.bytes, s->scratch, COMPRESSION_LZ4) != raw) return -1;
-        src = s->stage;
-    } else if (s->h.bytes != raw) return -1;
-    uint32_t k = 0;
-    for (uint32_t i = 0; i < pages && k < s->h.stored; i++)
-        if (s->h.bitmap[i / 8] & (1u << (i % 8))) memcpy(base + from + (uint64_t)i * PAGE, src + (uint64_t)k++ * PAGE, PAGE);
-    return k == s->h.stored ? 0 : -1;
+    compression_stream stream = {0};
+    compression_status status = COMPRESSION_STATUS_OK;
+    if (s->h.raw) {
+        if (s->h.bytes != raw) return -1;
+    } else {
+        if (compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_LZ4) != COMPRESSION_STATUS_OK) return -1;
+        stream.src_ptr = s->out;
+        stream.src_size = s->h.bytes;
+    }
+
+    int result = -1;
+    size_t used = 0;
+    for (uint32_t i = 0; i < pages;) {
+        if (!(s->h.bitmap[i / 8] & (1u << (i % 8)))) {
+            i++;
+            continue;
+        }
+        uint32_t first = i++;
+        while (i < pages && (s->h.bitmap[i / 8] & (1u << (i % 8)))) i++;
+        size_t bytes = (size_t)(i - first) * PAGE;
+        if (bytes > raw - used) goto done;
+        uint8_t *dst = base + from + (uint64_t)first * PAGE;
+        if (s->h.raw) memcpy(dst, s->out + used, bytes);
+        else {
+            stream.dst_ptr = dst;
+            stream.dst_size = bytes;
+            status = compression_stream_process(&stream, COMPRESSION_STREAM_FINALIZE);
+            if (status == COMPRESSION_STATUS_ERROR || stream.dst_size) goto done;
+        }
+        used += bytes;
+    }
+    if (used != raw) goto done;
+    if (!s->h.raw && status != COMPRESSION_STATUS_END) {
+        /* The last run can fill exactly before the codec consumes its end marker. */
+        uint8_t extra;
+        stream.dst_ptr = &extra;
+        stream.dst_size = 1;
+        if (compression_stream_process(&stream, COMPRESSION_STREAM_FINALIZE) != COMPRESSION_STATUS_END || !stream.dst_size) goto done;
+    }
+    result = 0;
+done:
+    if (!s->h.raw) compression_stream_destroy(&stream);
+    return result;
 }
 
 static double read_secs, unpack_secs; /* for the log: reading, and decompressing alongside */
@@ -414,7 +450,7 @@ static int load_ram(R *r, HvRam *ram) {
     if (rh.pa != ram->pa || rh.size != ram->size || rh.chunk_pages != CHUNK_PAGES || rh.nchunks != nchunks) return r->err = EINVAL, -1;
     Slot set[2][BATCH];
     memset(set, 0, sizeof set);
-    if (slots_alloc(set[0], BATCH) || slots_alloc(set[1], BATCH)) {
+    if (slots_alloc(set[0], BATCH, 0) || slots_alloc(set[1], BATCH, 0)) {
         slots_free(set[0], BATCH), slots_free(set[1], BATCH);
         return r->err = ENOMEM, -1;
     }
