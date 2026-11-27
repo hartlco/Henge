@@ -7,6 +7,7 @@ struct MacSettingsView: View {
     @State private var mac: VirtualMac
     @State private var confirmDelete = false
     @State private var movingExport = false
+    @State private var audioToolMessage: String?
     @AppStorage("henge.cpus") private var cpus = 4
 
     init(mac: VirtualMac) { _mac = State(initialValue: mac) }
@@ -66,10 +67,11 @@ struct MacSettingsView: View {
                         DisclosureGroup("Keep sound on in Sequoia") {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Automatic Bluetooth audio switching can keep Sequoia busy while idle. This experimental tool turns it off inside the virtual Mac. Leave Mac audio output on.")
-                                ShareLink(item: tool) {
-                                    Label("Export audio tool", systemImage: "square.and.arrow.up")
+                                Button("Copy audio tool to Shared") { copyAudioTool(tool) }
+                                if let audioToolMessage {
+                                    Text(audioToolMessage)
                                 }
-                                Text("Choose Save to Files and save the tool in Henge’s Shared folder. With file sharing set up, run this in the Mac’s Terminal and restart macOS.")
+                                Text("With Henge file sharing set up, run this in the virtual Mac’s Terminal and restart macOS.")
                                 Text("sudo /bin/sh ~/Henge/guest-audio-routing.sh apply")
                                     .font(.system(.caption, design: .monospaced))
                                     .textSelection(.enabled)
@@ -176,6 +178,25 @@ struct MacSettingsView: View {
             }
         } message: {
             Text("Its disk is removed from this \(Device.name).")
+        }
+    }
+
+    private func copyAudioTool(_ tool: URL) {
+        let fm = FileManager.default
+        let destination = Sharing.folder.appendingPathComponent(tool.lastPathComponent)
+        do {
+            try fm.createDirectory(at: Sharing.folder, withIntermediateDirectories: true)
+            do {
+                try fm.copyItem(at: tool, to: destination)
+            } catch CocoaError.fileWriteFileExists {
+                guard fm.contentsEqual(atPath: tool.path, andPath: destination.path) else {
+                    audioToolMessage = "A different file named guest-audio-routing.sh is in Shared. Rename it in Files, then copy the tool again."
+                    return
+                }
+            }
+            audioToolMessage = "Audio tool is ready in Shared."
+        } catch {
+            audioToolMessage = "Couldn’t copy the audio tool. \(error.localizedDescription)"
         }
     }
 
