@@ -21,6 +21,9 @@ import os
 /// something goes wrong.
 enum HengeLog {
     private static let osLog = Logger(subsystem: "com.henge.app", category: "henge")
+    // Xcode can write unified log records back to the stderr file we are reading.
+    private static let processLogPrefix = " \(ProcessInfo.processInfo.processName)[\(getpid()):"
+
 
     /// Exposed because a C signal handler closure cannot capture context.
     fileprivate static var rawLogFD: Int32 { logFD }
@@ -302,6 +305,11 @@ enum HengeLog {
     /// - Parameter fromStream: true when the line came out of the captured pipe,
     ///   meaning the C side already sent it to os_log itself.
     private static func emit(_ line: String, fromStream: Bool) {
+        if fromStream, line.first?.isNumber == true, let category = line.range(of: "] [henge] "),
+           let process = line[..<category.lowerBound].range(of: processLogPrefix),
+           process.upperBound < category.lowerBound, line[process.upperBound..<category.lowerBound].allSatisfy({ $0.isHexDigit }) {
+            return // Our own Console record was already written to the history and file.
+        }
         ringLock.lock()
         if ring.count < ringLimit {
             ring.append(line)
