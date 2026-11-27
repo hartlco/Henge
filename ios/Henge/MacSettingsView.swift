@@ -52,6 +52,20 @@ struct MacSettingsView: View {
                 .padding(.vertical, 10)
                 .deskCard()
 
+                DeskHeading("Sound")
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(isOn: Binding(get: { mac.soundEnabled ?? true }, set: {
+                        mac.soundEnabled = $0
+                        save()
+                    })) {
+                        Text("Mac audio output").font(.system(size: 16))
+                    }
+                    Text("Turn this off to save power when you don’t need sound. Changes take effect after you shut down macOS and start it again.")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                }
+                .padding(17)
+                .deskCard()
+
                 DeskHeading("About This Mac")
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle(isOn: Binding(get: { mac.reportHostIdentity ?? false }, set: {

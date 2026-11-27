@@ -16,21 +16,27 @@ enum InstantResume {
 
     /// What a saved Mac is for: this build of Henge (a restored machine must meet the code that saved it), the Mac,
     /// and what it was started with. The engine adds the disk's own identity.
-    static func ident(for mac: VirtualMac, ramMB: UInt64, cpus: Int) -> String {
+    private static func ident(for mac: VirtualMac, ramMB: UInt64, cpus: Int, sound: Bool) -> String {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "?"
         let build = info["CFBundleVersion"] as? String ?? "?"
         let commit = info["HengeBuildCommit"] as? String ?? "unstamped"
         let stamp = info["HengeBuildDate"] as? String ?? "?"
         return "Henge \(version) (\(build)) \(commit) \(stamp) mac \(mac.id.uuidString) ram \(ramMB) cpus \(cpus) "
-            + "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)"
+            + "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)" + (sound ? "" : " sound off")
     }
 
-    /// A whole saved Mac for these settings, and when it was saved.
-    static func saved(for mac: VirtualMac, ramMB: UInt64, cpus: Int) -> Date? {
-        var at: Int64 = 0
-        guard henge_vm_saved_ok(file(for: mac).path, ident(for: mac, ramMB: ramMB, cpus: cpus), nil, &at) == 0 else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(at))
+    /// A suspended Mac resumes with its original hardware, even if the next boot will use different sound settings.
+    static func saved(for mac: VirtualMac, ramMB: UInt64, cpus: Int, preferredSound: Bool) -> (at: Date, sound: Bool, id: String)? {
+        guard hasSave(for: mac) else { return nil }
+        for sound in [preferredSound, !preferredSound] where !sound || getenv("HV_NO_SOUND") == nil {
+            let id = ident(for: mac, ramMB: ramMB, cpus: cpus, sound: sound)
+            var at: Int64 = 0
+            if henge_vm_saved_ok(file(for: mac).path, id, nil, &at) == 0 {
+                return (Date(timeIntervalSince1970: TimeInterval(at)), sound, id)
+            }
+        }
+        return nil
     }
 
     /// Whether a file is there at all (the Home screen's hint; the start checks it properly).
@@ -53,9 +59,9 @@ enum InstantResume {
     }
 
     /// Henge is in the background: write the paused Mac out, in case iOS closes Henge. It stays paused.
-    static func suspend(_ mac: VirtualMac, ramMB: UInt64, cpus: Int) {
+    static func suspend(_ mac: VirtualMac, ramMB: UInt64, cpus: Int, sound: Bool) {
         guard enabled, henge_vm_state() == 1 || henge_vm_state() == 4 else { return }
-        let path = file(for: mac).path, id = ident(for: mac, ramMB: ramMB, cpus: cpus)
+        let path = file(for: mac).path, id = ident(for: mac, ramMB: ramMB, cpus: cpus, sound: sound)
         var task = UIBackgroundTaskIdentifier.invalid
         task = UIApplication.shared.beginBackgroundTask(withName: "Henge save") {
             UIApplication.shared.endBackgroundTask(task)

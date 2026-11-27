@@ -38,6 +38,9 @@ static int lock_running(void);
 /* A Mac app ran through the translation layer in this launch (henge-tl.c): it may have remapped part of the JIT region. */
 _Atomic int henge_tl_ran;
 
+static int omit_sound_device;
+void henge_vm_set_sound_device(int enabled) { omit_sound_device = !enabled; }
+
 /* What About This Mac reports (DeviceIdentity.swift): the device Henge runs on, as the guest sees it. */
 static char identity_soc[32], identity_name[32], identity_model[32];
 
@@ -201,7 +204,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
         return failed_start();
     }
     HvVmConfig c = {.rom = rom, .disk = disk, .aux = aux, .ecid = ecid, .seed = seed, .ram_mb = ram_mb, .ncpus = cpus, .log = 1,
-                    .soc_name = identity_soc[0] ? identity_soc : NULL,
+                    .omit_sound_device = omit_sound_device, .soc_name = identity_soc[0] ? identity_soc : NULL,
                     .product_name = identity_name[0] ? identity_name : NULL,
                     .model_id = identity_model[0] ? identity_model : NULL,
                     .jit_rx = jit->rx_addr, .jit_rw = jit->rw_addr, .jit_bytes = jit->size};

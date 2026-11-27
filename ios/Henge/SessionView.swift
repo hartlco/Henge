@@ -19,6 +19,7 @@ struct SessionView: View {
     @State private var log: [String] = []
     @State private var started = Date()
     @State private var thermalState = ProcessInfo.processInfo.thermalState
+    @State private var bootSound = true
     @State private var bootRAM: UInt64 = 0 /* what the Mac was started with, which a save is for */
     @AppStorage("henge.cpus") private var cpus = 4
     @AppStorage("henge.matchScreenColors") private var matchScreenColors = true
@@ -177,7 +178,7 @@ struct SessionView: View {
             HardwareMouse.shared.releaseButtons()
             VolumeClicks.shared.releaseButtons()
             if phase == .inactive { InstantResume.pause() }
-            if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
+            if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus, sound: bootSound) }
         }
         .onChange(of: showDetails) { showing in
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
@@ -614,12 +615,15 @@ struct SessionView: View {
         } else {
             henge_vm_set_identity(nil, nil, nil)
         }
+        let preferredSound = (mac.soundEnabled ?? true) && getenv("HV_NO_SOUND") == nil
         var rc: Int32 = -1
-        if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
-            HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
+        if InstantResume.enabled, let saved = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus, preferredSound: preferredSound) {
+            bootSound = saved.sound
+            henge_vm_set_sound_device(bootSound ? 1 : 0)
+            HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(saved.at))) s ago")
             let t0 = Date()
             rc = henge_vm_resume(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus),
-                                 InstantResume.file(for: mac).path, InstantResume.ident(for: mac, ramMB: ram, cpus: cpus), &buffer, buffer.count)
+                                 InstantResume.file(for: mac).path, saved.id, &buffer, buffer.count)
             if rc == 0 {
                 HengeLog.log("resume", String(format: "resumed in %.1f s", Date().timeIntervalSince(t0)))
             } else {
@@ -629,12 +633,15 @@ struct SessionView: View {
         }
         InstantResume.discard(for: mac) /* used or out of date: the disk moves on from here */
         if rc != 0 {
+            bootSound = preferredSound
+            henge_vm_set_sound_device(bootSound ? 1 : 0)
             rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         }
         if rc != 0 {
             error = String(cString: buffer)
             return
         }
+        HengeLog.log("session", "virtual sound device \(bootSound ? "on" : "off")")
         bootRAM = ram
         started = Date()
         var used = mac

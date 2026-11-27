@@ -9,6 +9,7 @@
    out as QEMU's hw/vmapple/cfg.c describes it. */
 typedef struct HvCfgParams {
     uint32_t nr_cpus;
+    int omit_sound_device;
     uint64_t ecid;
     uint64_t ram_size;
     uint32_t run_installer1, run_installer2;

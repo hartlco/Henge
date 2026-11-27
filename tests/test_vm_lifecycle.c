@@ -146,7 +146,7 @@ int main(void) {
         uint32_t code[] = {0xd2ae0001, 0xf9400022, 0x91000442, 0xf9000022, 0x17fffffd};
         write_file(rom, code, sizeof code);
         int rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
-        check("resume test boots", rc == 0);
+        check("resume test boots with sound by default", rc == 0 && hv_vm_board()->snd != NULL);
         usleep(50000);
         rc = henge_vm_suspend(snap, "test", error, sizeof error);
         if (rc) fprintf(stderr, "suspend: %s\n", error);
@@ -169,8 +169,11 @@ int main(void) {
         rc = henge_vm_resume(rom, disk, aux, 1, 0, 64, 2, snap, "other", error, sizeof error);
         check("resume with another ident fails and leaves it startable", rc != 0 && henge_vm_can_start());
         check("a failed resume uses the file up too", access(snap, F_OK) != 0);
-        /* Save again (the failed resume took the file), then resume it properly. */
+        /* Save again without the sound card, then resume with the same hardware. */
+        henge_vm_set_sound_device(0);
         rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
+        check("soundless boot keeps the keyboard, mouse and USB controller", rc == 0 && !hv_vm_board()->snd &&
+              hv_vm_board()->keyboard && hv_vm_board()->mouse && hv_vm_board()->usb);
         /* Two sparse chunks, one compressible and one filled with incompressible data. */
         enum { page = 0x4000, span = 5 * page };
         uint8_t *pattern = calloc(2, span);
@@ -187,7 +190,7 @@ int main(void) {
         henge_vm_stop();
         rc |= henge_vm_resume(rom, disk, aux, 1, 0, 64, 2, snap, "test", error, sizeof error);
         if (rc) fprintf(stderr, "resume: %s\n", error);
-        check("resume starts the saved Mac", rc == 0 && henge_vm_state() == 1);
+        check("resume starts the saved Mac without sound", rc == 0 && henge_vm_state() == 1 && !hv_vm_board()->snd);
         check("resume restores sparse pages and their gaps",
               !memcmp(hv_vm_board()->ram + (8u << 20), pattern, span) &&
               !memcmp(hv_vm_board()->ram + (12u << 20), pattern + span, span));
@@ -200,8 +203,10 @@ int main(void) {
         henge_vm_stop();
         for (int n = 0; n < 3000 && henge_vm_state() != 2; n++) usleep(1000);
         check("resumed Mac stops", henge_vm_state() == 2);
+        henge_vm_set_sound_device(1);
         /* A disk written after the save: the saved Mac must not come back over it. */
         rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
+        check("the next cold boot can restore the sound card", rc == 0 && hv_vm_board()->snd != NULL);
         usleep(30000);
         rc |= henge_vm_suspend(snap, "test", error, sizeof error);
         henge_vm_stop();

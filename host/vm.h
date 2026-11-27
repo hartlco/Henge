@@ -19,6 +19,7 @@ typedef struct HvVmConfig {
     int ncpus;
     int log;                  /* m->log */
     int no_net, no_sound;
+    int omit_sound_device;    /* leave the virtual sound card off the PCI bus */
     int installer;            /* boot the ROM in DFU mode with the USB device port (installing macOS) */
     /* What the guest says it is (NULL: the vmapple defaults). serial, model and
        soc_name go through the config region; product_name and model_id are fixed

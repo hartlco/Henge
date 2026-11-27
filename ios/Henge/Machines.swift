@@ -13,6 +13,7 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     var added = Date()
     var osName: String?
     var lastUsed: Date?
+    var soundEnabled: Bool?
     /// The size macOS is told its screen is. Macs made before this was a choice have none: 16:9.
     var screenWidth: Int?
     var screenHeight: Int?
@@ -59,6 +60,7 @@ private struct MachineFile: Codable {
     var ecid: UInt64
     var seed: UInt64?
     var ramMB: Int?
+    var soundEnabled: Bool?
 }
 
 @MainActor
@@ -123,7 +125,7 @@ final class Machines: ObservableObject {
                let info = try? JSONDecoder().decode(MachineFile.self, from: data),
                fm.fileExists(atPath: item.appendingPathComponent("disk.img").path) {
                 var mac = VirtualMac(id: id, name: info.name ?? "Mac", ecid: info.ecid, seed: info.seed ?? 0,
-                                     ramMB: info.ramMB ?? Device.suggestedRAMGB * 1024, diskBytes: 64 << 30)
+                                     ramMB: info.ramMB ?? Device.suggestedRAMGB * 1024, diskBytes: 64 << 30, soundEnabled: info.soundEnabled)
                 let os = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 mac.osName = os.isEmpty ? nil : os
                 (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
@@ -175,7 +177,7 @@ final class Machines: ObservableObject {
             let missing = Self.required.filter { !FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
             guard missing.isEmpty, Self.hasDisk(folder) else { throw message("The folder is missing \((missing + (Self.hasDisk(folder) ? [] : ["disk.img"])).joined(separator: ", ")).") }
             var mac = VirtualMac(name: info.name ?? folder.lastPathComponent, ecid: info.ecid, seed: info.seed ?? 0,
-                                 ramMB: info.ramMB ?? 2048, diskBytes: 0)
+                                 ramMB: info.ramMB ?? 2048, diskBytes: 0, soundEnabled: info.soundEnabled)
             importing = mac.name
             unpacked = 0
             let dest = mac.directory
@@ -254,7 +256,7 @@ final class Machines: ObservableObject {
         do {
             try fm.copyItem(at: mac.rom, to: partial.appendingPathComponent("AVPBooter.vmapple2.bin"))
             try fm.copyItem(at: mac.aux, to: partial.appendingPathComponent("auxiliary.bin"))
-            let info: [String: Any] = ["name": mac.name, "ecid": mac.ecid, "seed": mac.seed, "ramMB": mac.ramMB]
+            let info: [String: Any] = ["name": mac.name, "ecid": mac.ecid, "seed": mac.seed, "ramMB": mac.ramMB, "soundEnabled": mac.soundEnabled ?? true]
             try JSONSerialization.data(withJSONObject: info).write(to: partial.appendingPathComponent("machine.json"))
             let source = mac.disk.path, target = partial.appendingPathComponent(Self.packedDisk).path
             let ok = await Task.detached { () -> Bool in
