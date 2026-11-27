@@ -923,6 +923,27 @@ static void test_gic_routing(void) {
     }
 }
 
+static void test_gic_private_sources(void) {
+    uint64_t bank = VMAPPLE_GIC_REDIST + 0x10000;
+    wr32(bank + 0x80, UINT32_MAX);
+    wr32(bank + 0x100, UINT32_MAX);
+    wr32(bank + 0xc04, 0); /* all PPIs level-triggered */
+    for (int id = 0; id < 32; id++) {
+        wr32(bank + 0x200, 1u << id);
+        check("private software-pending ID", m.icc_read(&m, &cpu, ICC_IAR1), id);
+        m.icc_write(&m, &cpu, ICC_EOIR1, id);
+        check("private latch consumed", m.percpu[0].irq_line, 0);
+    }
+    for (int id = 16; id < 32; id++) {
+        hv_gicv3_set_ppi(board.gic, 0, id, 1);
+        check("asserted PPI with no latch", m.icc_read(&m, &cpu, ICC_IAR1), id);
+        m.icc_write(&m, &cpu, ICC_EOIR1, id);
+        check("level PPI repends", m.percpu[0].irq_line, 1);
+        hv_gicv3_set_ppi(board.gic, 0, id, 0);
+        check("deasserted PPI clears", m.percpu[0].irq_line, 0);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (hv_machine_init(&m, 4 << 20) != 0) return 1;
@@ -974,6 +995,7 @@ int main(void) {
     check("gpio interrupt cleared", board.gic->level[32 + VMAPPLE_IRQ_GPIO], 0);
     test_guest_programs();
     test_gic_routing();
+    test_gic_private_sources();
     test_gpu_task_pages();
     test_scroll_pair();
     test_sound_wakes();

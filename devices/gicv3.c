@@ -46,15 +46,20 @@ static int target_of(HvGic *g, int i) {
 /* CPU c's highest-priority pending interrupt; with `masked`, only one PMR and the running priority let through. */
 static int hppi(HvGic *g, int c, int masked) {
     int best = SPURIOUS, best_prio = 0x100;
-    /* SGIs and PPIs, then only the SPIs that are enabled: there are 256 of them and a few are in use. */
-    for (int i = 0; i < 32; i++) {
-        if (!F(g, c, enabled, i) || F(g, c, active, i) || !pending(g, c, i)) continue;
-        if (!group_enabled(g, c, F(g, c, group, i))) continue;
-        if (F(g, c, priority, i) < best_prio) {
-            best = i;
-            best_prio = F(g, c, priority, i);
+    /* Most line updates find no asserted or latched private interrupt. */
+    static const uint8_t zero[sizeof g->cpu[c].latch];
+    HvGicCpu *k = &g->cpu[c];
+    if (memcmp(k->latch, zero, sizeof zero) || memcmp(k->level, zero, sizeof zero)) {
+        for (int i = 0; i < 32; i++) {
+            if (!k->enabled[i] || k->active[i] || !pending(g, c, i)) continue;
+            if (!group_enabled(g, c, k->group[i])) continue;
+            if (k->priority[i] < best_prio) {
+                best = i;
+                best_prio = k->priority[i];
+            }
         }
     }
+    /* Only a few of the 256 shared lines are enabled. */
     for (int w = 0; w < (HV_GIC_NUM_IRQS + 63) / 64; w++)
         for (uint64_t bits = g->spi_on[w]; bits; bits &= bits - 1) {
             int i = w * 64 + __builtin_ctzll(bits);
